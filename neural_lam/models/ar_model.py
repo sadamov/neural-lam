@@ -158,7 +158,7 @@ class ARModel(pl.LightningModule):
             self.boundary_dim = (
                 boundary_static_dim
                 # Time delta counts as one additional forcing_feature
-                + (self.num_boundary_forcing_vars + self.time_delta_enc_dim)
+                + (num_boundary_forcing_vars + self.time_delta_enc_dim)
                 * (
                     self.num_past_boundary_steps
                     + self.num_future_boundary_steps
