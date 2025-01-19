@@ -214,6 +214,13 @@ class ARModel(pl.LightningModule):
             else {}
         )
 
+        # Create visualizer instance
+        self.visualizer = Visualizer(
+            interior_datastore=self._datastore,
+            boundary_datastore=self._datastore_boundary,
+            boundary_var_map=self.boundary_var_map
+        )
+
     def _create_dataarray_from_tensor(
         self,
         tensor: torch.Tensor,
@@ -221,71 +228,18 @@ class ARModel(pl.LightningModule):
         split: str,
         category: str,
     ) -> xr.DataArray:
-        """
-        Create an `xr.DataArray` from a tensor, with the correct dimensions and
-        coordinates to match the datastore used by the model. This function in
-        in effect is the inverse of what is returned by
-        `WeatherDataset.__getitem__`.
-
-        Parameters
-        ----------
-        tensor : torch.Tensor
-            The tensor to convert to a `xr.DataArray` with dimensions [time,
-            grid_index, feature]. The tensor will be copied to the CPU if it is
-            not already there.
-        time : Union[int,List[int]]
-            The time index or indices for the data, given as integers or a list
-            of integers representing epoch time in nanoseconds. The ints will be
-            copied to the CPU memory if they are not already there.
-        split : str
-            The split of the data, either 'train', 'val', or 'test'
-        category : str
-            The category of the data, either 'state' or 'forcing'
-        """
-        # TODO: creating an instance of WeatherDataset here on every call is
-        # not how this should be done but whether WeatherDataset should be
-        # provided to ARModel or where to put plotting still needs discussion
-
-        # Determine if this is boundary data
-        is_boundary_data = (
-            self.boundary_forced
+        """Convert tensor to DataArray for plotting"""
+        is_boundary = (
+            self.boundary_forced 
             and category == "forcing"
             and self._datastore_boundary is not None
         )
-
-        # Select appropriate datastore based on data type
-        if is_boundary_data:
-            # For boundary forcing data, use boundary datastore
-            datastore = self._datastore_boundary
-            # For boundary data, we don't need state info from main datastore
-            datastore_boundary = None
-        else:
-            # For interior data (state/forcing), use main datastore
-            datastore = self._datastore
-            # Provide boundary datastore for proper coordinate info
-            datastore_boundary = self._datastore_boundary
-
-        # Create WeatherDataset with appropriate configuration
-        weather_dataset = WeatherDataset(
-            datastore=datastore,
-            datastore_boundary=datastore_boundary,
-            split=split,
-            ar_steps=1,  # Minimal value since we don't need AR steps here
-            standardize=False,  # No need to standardize for plotting
-            require_state_data=(
-                not is_boundary_data
-            ),  # Only require state data for interior
+        return self.visualizer.tensor_to_dataarray(
+            tensor=tensor,
+            times=time,
+            category=category,
+            is_boundary=is_boundary
         )
-
-        # Move to CPU if on GPU
-        time = time.detach().cpu()
-        time = np.array(time, dtype="datetime64[ns]")
-
-        tensor = tensor.detach().cpu()
-        da = weather_dataset.create_dataarray_from_tensor(
-            tensor=tensor, time=time, category=category
-        )
-        return da
 
     def configure_optimizers(self):
         opt = torch.optim.AdamW(

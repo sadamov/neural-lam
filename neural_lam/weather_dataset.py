@@ -55,6 +55,9 @@ class WeatherDataset(torch.utils.data.Dataset):
         at time t. Default is 1.
     standardize : bool, optional
         Whether to standardize the data. Default is True.
+    require_state_data : bool, optional
+        Whether to require state data to be present. If False, the dataset will
+        not raise an error if no state data is found. Default is True.
     """
 
     def __init__(
@@ -68,6 +71,7 @@ class WeatherDataset(torch.utils.data.Dataset):
         num_past_boundary_steps=1,
         num_future_boundary_steps=1,
         standardize=True,
+        require_state_data=True,
     ):
         super().__init__()
 
@@ -83,7 +87,7 @@ class WeatherDataset(torch.utils.data.Dataset):
         self.da_state = self.datastore.get_dataarray(
             category="state", split=self.split
         )
-        if self.da_state is None:
+        if require_state_data and self.da_state is None:
             raise ValueError(
                 "A non-empty state dataarray must be provided. "
                 "The datastore.get_dataarray() returned None or empty array "

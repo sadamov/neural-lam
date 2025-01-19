@@ -1,21 +1,266 @@
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Union
+
 # Third-party
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
 import xarray as xr
 
 # Local
 from . import utils
-from .datastore.base import BaseRegularGridDatastore
+from .datastore.base import BaseDatastore, BaseRegularGridDatastore
+
+
+@dataclass
+class PlotCoordinates:
+    """Container for coordinate information needed for plotting.
+
+    Parameters
+    ----------
+    grid_index : xr.DataArray
+        Grid indices for the data points
+    feature_names : list[str]
+        Names of the features in the data
+    feature_units : list[str]
+        Units for each feature
+    x_coords : xr.DataArray, optional
+        X coordinates of data points
+    y_coords : xr.DataArray, optional
+        Y coordinates of data points
+    projection : ccrs.Projection, optional
+        Cartographic projection to use
+    """
+
+    grid_index: xr.DataArray
+    feature_names: List[str]
+    feature_units: List[str]
+    x_coords: Optional[xr.DataArray] = None
+    y_coords: Optional[xr.DataArray] = None
+    projection: Optional[ccrs.Projection] = None
+
+    def __post_init__(self):
+        """Validate the coordinates after initialization."""
+        if not isinstance(self.grid_index, xr.DataArray):
+            raise TypeError("grid_index must be an xarray DataArray")
+            
+        if len(self.feature_names) != len(self.feature_units):
+            raise ValueError(
+                f"Number of feature names ({len(self.feature_names)}) must match "
+                f"number of units ({len(self.feature_units)})"
+            )
+        if (self.x_coords is None) != (self.y_coords is None):
+            raise ValueError(
+                "Both x_coords and y_coords must be provided together"
+            )
+
+
+class Visualizer:
+    """Handles conversion of tensors to plotable arrays with coordinates.
+
+    Parameters
+    ----------
+    interior_datastore : BaseDatastore
+        Datastore containing the interior domain data
+    boundary_datastore : BaseDatastore, optional
+        Datastore containing boundary data
+    boundary_var_map : Dict[str, str], optional
+        Mapping between interior and boundary variable names
+    """
+
+    def __init__(
+        self,
+        interior_datastore: BaseDatastore,
+        boundary_datastore: Optional[BaseDatastore] = None,
+        boundary_var_map: Optional[Dict[str, str]] = None,
+    ):
+        if not isinstance(interior_datastore, BaseDatastore):
+            raise TypeError("interior_datastore must be a BaseDatastore")
+        if boundary_datastore is not None and not isinstance(
+            boundary_datastore, BaseDatastore
+        ):
+            raise TypeError("boundary_datastore must be a BaseDatastore")
+
+        self._interior_datastore = interior_datastore
+        self._boundary_datastore = boundary_datastore
+        self.boundary_var_map = boundary_var_map or {}
+
+        # Cache coordinate information
+        self.interior_coords = self._extract_coords(interior_datastore, "state")
+        if boundary_datastore:
+            try:
+                self.boundary_coords = self._extract_coords(
+                    boundary_datastore, "forcing"
+                )
+            except Exception as e:
+                raise RuntimeError(
+                    "Failed to extract boundary coordinates"
+                ) from e
+        else:
+            self.boundary_coords = None
+
+    @staticmethod
+    def _extract_coords(
+        datastore: BaseDatastore, category: str
+    ) -> PlotCoordinates:
+        """Extract coordinate information from a datastore.
+
+        Parameters
+        ----------
+        datastore : BaseDatastore
+            The datastore to extract coordinates from
+        category : str
+            Data category to extract ('state' or 'forcing')
+
+        Returns
+        -------
+        PlotCoordinates
+            Container with extracted coordinate information
+
+        Raises
+        ------
+        ValueError
+            If required data is missing from datastore
+        """
+        da = datastore.get_dataarray(category=category, split="train")
+        if da is None:
+            raise ValueError(f"No {category} data found in datastore")
+
+        try:
+            return PlotCoordinates(
+                grid_index=da.grid_index,
+                feature_names=datastore.get_vars_names(category),
+                feature_units=datastore.get_vars_units(category),
+                x_coords=da.x if "x" in da.coords else None,
+                y_coords=da.y if "y" in da.coords else None,
+                projection=getattr(datastore, "coords_projection", None),
+            )
+        except Exception as e:
+            raise ValueError(
+                f"Failed to extract coordinates for {category}"
+            ) from e
+
+    def tensor_to_dataarray(
+        self,
+        tensor: torch.Tensor,
+        times: Union[int, List[int]],
+        category: str,
+        is_boundary: bool = False,
+    ) -> xr.DataArray:
+        """Convert tensor to DataArray with proper coordinates.
+
+        Parameters
+        ----------
+        tensor : torch.Tensor
+            Data tensor to convert
+        times : Union[int, List[int]]
+            Time points in nanoseconds since epoch
+        category : str
+            Data category ('state' or 'forcing')
+        is_boundary : bool, optional
+            Whether this is boundary data
+
+        Returns
+        -------
+        xr.DataArray
+            DataArray with proper coordinates
+
+        Raises
+        ------
+        ValueError
+            If input validation fails
+        """
+        if not isinstance(tensor, torch.Tensor):
+            raise TypeError("tensor must be a torch.Tensor")
+        if category not in ("state", "forcing"):
+            raise ValueError("category must be 'state' or 'forcing'")
+
+        # Move to CPU and convert to numpy
+        tensor = tensor.detach().cpu().numpy()
+        times = np.array(times, dtype="datetime64[ns]")
+
+        # Select appropriate coordinates and datastore
+        if is_boundary:
+            if self._boundary_datastore is None:
+                raise ValueError(
+                    "No boundary datastore provided for boundary data"
+                )
+            coords = self.boundary_coords
+            datastore = self._boundary_datastore
+        else:
+            coords = self.interior_coords
+            datastore = self._interior_datastore
+
+        # Validate tensor shape
+        if len(tensor.shape) not in (2, 3):
+            raise ValueError("tensor must be 2D or 3D")
+        if len(tensor.shape) == 3 and tensor.shape[0] != len(times):
+            raise ValueError(
+                "Number of time points must match first tensor dimension"
+            )
+
+        # Create dimensions list based on tensor shape
+        dims = []
+        if len(tensor.shape) == 3:
+            dims.append("time")
+        dims.extend(["grid_index", f"{category}_feature"])
+
+        # Build coordinates dict
+        coord_dict = {
+            "grid_index": coords.grid_index,
+            f"{category}_feature": coords.feature_names,
+        }
+        if len(tensor.shape) == 3:
+            coord_dict["time"] = times
+        elif len(tensor.shape) == 2:
+            coord_dict["time"] = times[0] if isinstance(times, list) else times
+
+        # Create DataArray
+        da = xr.DataArray(tensor, dims=dims, coords=coord_dict)
+
+        # Add spatial coordinates if available
+        if coords.x_coords is not None:
+            da.coords["x"] = coords.x_coords
+        if coords.y_coords is not None:
+            da.coords["y"] = coords.y_coords
+
+        return da
 
 
 @matplotlib.rc_context(utils.fractional_plot_bundle(1))
-def plot_error_map(errors, datastore: BaseRegularGridDatastore, title=None):
+def plot_error_map(
+    errors: Union[np.ndarray, torch.Tensor],
+    datastore: BaseRegularGridDatastore,
+    title: Optional[str] = None,
+) -> plt.Figure:
+    """Plot a heatmap of errors of different variables at different prediction horizons.
+
+    Parameters
+    ----------
+    errors : Union[np.ndarray, torch.Tensor]
+        Array of errors to plot
+    datastore : BaseRegularGridDatastore
+        Datastore containing the data
+    title : str, optional
+        Title for the plot
+
+    Returns
+    -------
+    plt.Figure
+        The resulting figure
+
+    Raises
+    ------
+    TypeError
+        If errors is not a numpy array or torch tensor
     """
-    Plot a heatmap of errors of different variables at different
-    predictions horizons
-    errors: (pred_steps, d_f)
-    """
+    if not isinstance(errors, (np.ndarray, torch.Tensor)):
+        raise TypeError("errors must be numpy array or torch tensor")
+
     errors_np = errors.T.cpu().numpy()  # (d_f, pred_steps)
     d_f, pred_steps = errors_np.shape
     step_length = datastore.step_length
@@ -64,19 +309,21 @@ def plot_error_map(errors, datastore: BaseRegularGridDatastore, title=None):
     return fig
 
 
-def find_closest_boundary_time(da_boundary_forcing, target_time):
+def find_closest_boundary_time(
+    da_boundary_forcing: xr.DataArray, target_time: np.datetime64
+) -> xr.DataArray:
     """Find the boundary forcing time closest to the target time.
 
     Parameters
     ----------
-    da_boundary_forcing : xarray.DataArray
+    da_boundary_forcing : xr.DataArray
         DataArray containing boundary forcing data with a 'window' dimension
-    target_time : numpy.datetime64
+    target_time : np.datetime64
         Target time to find closest match for
 
     Returns
     -------
-    xarray.DataArray
+    xr.DataArray
         Boundary forcing data at the closest time
     """
     window_times = da_boundary_forcing.window_time_deltas
@@ -85,21 +332,63 @@ def find_closest_boundary_time(da_boundary_forcing, target_time):
 
 
 def plot_on_axis(
-    ax,
-    da,
-    datastore,
-    boundary_da=None,
-    boundary_datastore=None,
-    obs_mask=None,
-    vmin=None,
-    vmax=None,
-    ax_title=None,
-    cmap="plasma",
-    grid_limits=None,
-):
+    ax: plt.Axes,
+    da: xr.DataArray,
+    datastore: BaseRegularGridDatastore,
+    boundary_da: Optional[xr.DataArray] = None,
+    boundary_datastore: Optional[BaseRegularGridDatastore] = None,
+    obs_mask: Optional[np.ndarray] = None,
+    vmin: Optional[float] = None,
+    vmax: Optional[float] = None,
+    ax_title: Optional[str] = None,
+    cmap: str = "plasma",
+    grid_limits: Optional[Tuple[float, float]] = None,
+) -> plt.Axes:
+    """Plot weather state on given axis with optional boundary data.
+
+    Parameters
+    ----------
+    ax : plt.Axes
+        Matplotlib axis to plot on
+    da : xr.DataArray
+        DataArray to plot
+    datastore : BaseRegularGridDatastore
+        Datastore containing the data
+    boundary_da : xr.DataArray, optional
+        Boundary data to plot
+    boundary_datastore : BaseRegularGridDatastore, optional
+        Datastore containing boundary data
+    obs_mask : np.ndarray, optional
+        Observation mask
+    vmin : float, optional
+        Minimum value for color scale
+    vmax : float, optional
+        Maximum value for color scale
+    ax_title : str, optional
+        Title for the axis
+    cmap : str, optional
+        Colormap to use
+    grid_limits : Tuple[float, float], optional
+        Limits for the grid
+
+    Returns
+    -------
+    plt.Axes
+        The axis with the plot
+
+    Raises
+    ------
+    TypeError
+        If ax is not a matplotlib Axes object
+    ValueError
+        If boundary_da is provided without boundary_datastore
     """
-    Plot weather state on given axis with optional boundary data
-    """
+    if not isinstance(ax, plt.Axes):
+        raise TypeError("ax must be a matplotlib Axes object")
+
+    if boundary_da is not None and boundary_datastore is None:
+        raise ValueError("boundary_datastore required for boundary plotting")
+
     # Plot interior data
     extent = datastore.get_xy_extent("state")
     im = da.plot.imshow(
@@ -137,25 +426,56 @@ def plot_on_axis(
 @matplotlib.rc_context(utils.fractional_plot_bundle(1))
 def plot_prediction(
     datastore: BaseRegularGridDatastore,
-    da_prediction: xr.DataArray = None,
-    da_target: xr.DataArray = None,
-    da_boundary: xr.DataArray = None,
-    boundary_datastore: BaseRegularGridDatastore = None,
-    boundary_var_map: dict = None,  # Add mapping parameter
-    state_var_idx: int = None,  # Add current variable index
-    title=None,
-    vrange=None,
-):
-    """
-    Plot example prediction and ground truth with optional boundary data.
+    da_prediction: Optional[xr.DataArray] = None,
+    da_target: Optional[xr.DataArray] = None,
+    da_boundary: Optional[xr.DataArray] = None,
+    boundary_datastore: Optional[BaseRegularGridDatastore] = None,
+    boundary_var_map: Optional[Dict[str, str]] = None,
+    state_var_idx: Optional[int] = None,
+    title: Optional[str] = None,
+    vrange: Optional[Tuple[float, float]] = None,
+) -> plt.Figure:
+    """Plot example prediction and ground truth with optional boundary data.
 
     Parameters
     ----------
-    boundary_var_map : dict
+    datastore : BaseRegularGridDatastore
+        Datastore containing the data
+    da_prediction : xr.DataArray, optional
+        Prediction data to plot
+    da_target : xr.DataArray, optional
+        Target data to plot
+    da_boundary : xr.DataArray, optional
+        Boundary data to plot
+    boundary_datastore : BaseRegularGridDatastore, optional
+        Datastore containing boundary data
+    boundary_var_map : Dict[str, str], optional
         Mapping from interior variable names to boundary variable names
-    state_var_idx : int
+    state_var_idx : int, optional
         Index of the current state variable being plotted
+    title : str, optional
+        Title for the plot
+    vrange : Tuple[float, float], optional
+        Value range for the plot
+
+    Returns
+    -------
+    plt.Figure
+        The resulting figure
+
+    Raises
+    ------
+    ValueError
+        If boundary data is provided without boundary_datastore
     """
+    if da_boundary is not None and boundary_datastore is None:
+        raise ValueError(
+            "boundary_datastore required when plotting boundary data"
+        )
+
+    if not hasattr(datastore, "coords_projection"):
+        raise ValueError("datastore must have coords_projection")
+
     # Get common scale for values
     if vrange is None:
         vmin = min(da_prediction.min(), da_target.min())
@@ -227,11 +547,28 @@ def plot_prediction(
 
 @matplotlib.rc_context(utils.fractional_plot_bundle(1))
 def plot_spatial_error(
-    error, datastore: BaseRegularGridDatastore, title=None, vrange=None
-):
-    """
-    Plot errors over spatial map
-    Error and obs_mask has shape (N_grid,)
+    error: torch.Tensor,
+    datastore: BaseRegularGridDatastore,
+    title: Optional[str] = None,
+    vrange: Optional[Tuple[float, float]] = None,
+) -> plt.Figure:
+    """Plot errors over spatial map.
+
+    Parameters
+    ----------
+    error : torch.Tensor
+        Error tensor to plot
+    datastore : BaseRegularGridDatastore
+        Datastore containing the data
+    title : str, optional
+        Title for the plot
+    vrange : Tuple[float, float], optional
+        Value range for the plot
+
+    Returns
+    -------
+    plt.Figure
+        The resulting figure
     """
     # Get common scale for values
     if vrange is None:
