@@ -253,22 +253,30 @@ class ARModel(pl.LightningModule):
             and self._datastore_boundary is not None
         )
 
-        # Use correct datastore and boundary datastore
-        datastore = (
-            self._datastore_boundary if is_boundary_data else self._datastore
-        )
-        datastore_boundary = (
-            self._datastore_boundary if not is_boundary_data else None
-        )
+        # Select appropriate datastore based on data type
+        if is_boundary_data:
+            # For boundary forcing data, use boundary datastore
+            datastore = self._datastore_boundary
+            # For boundary data, we don't need state info from main datastore
+            datastore_boundary = None
+        else:
+            # For interior data (state/forcing), use main datastore
+            datastore = self._datastore
+            # Provide boundary datastore for proper coordinate info
+            datastore_boundary = self._datastore_boundary
 
-        # Create WeatherDataset with appropriate datastores
+        # Create WeatherDataset with appropriate configuration
         weather_dataset = WeatherDataset(
             datastore=datastore,
             datastore_boundary=datastore_boundary,
             split=split,
             ar_steps=1,  # Minimal value since we don't need AR steps here
             standardize=False,  # No need to standardize for plotting
+            require_state_data=(
+                not is_boundary_data
+            ),  # Only require state data for interior
         )
+
         # Move to CPU if on GPU
         time = time.detach().cpu()
         time = np.array(time, dtype="datetime64[ns]")
