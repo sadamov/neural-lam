@@ -15,7 +15,6 @@ from .. import metrics, vis
 from ..config import NeuralLAMConfig
 from ..datastore import BaseDatastore
 from ..loss_weighting import get_state_feature_weighting
-from ..weather_dataset import WeatherDataset
 
 
 class ARModel(pl.LightningModule):
@@ -215,10 +214,10 @@ class ARModel(pl.LightningModule):
         )
 
         # Create visualizer instance
-        self.visualizer = Visualizer(
+        self.visualizer = vis.Visualizer(
             interior_datastore=self._datastore,
             boundary_datastore=self._datastore_boundary,
-            boundary_var_map=self.boundary_var_map
+            boundary_var_map=self.boundary_var_map,
         )
 
     def _create_dataarray_from_tensor(
@@ -230,7 +229,7 @@ class ARModel(pl.LightningModule):
     ) -> xr.DataArray:
         """Convert tensor to DataArray for plotting"""
         is_boundary = (
-            self.boundary_forced 
+            self.boundary_forced
             and category == "forcing"
             and self._datastore_boundary is not None
         )
@@ -238,7 +237,7 @@ class ARModel(pl.LightningModule):
             tensor=tensor,
             times=time,
             category=category,
-            is_boundary=is_boundary
+            is_boundary=is_boundary,
         )
 
     def configure_optimizers(self):
@@ -616,7 +615,7 @@ class ARModel(pl.LightningModule):
             for t_i, _ in enumerate(zip(pred_slice, target_slice), start=1):
                 # For each time step, find closest boundary time if available
                 if boundary_slice is not None and self.boundary_forced:
-                    da_boundary_t = find_closest_boundary_time(
+                    da_boundary_t = vis.find_closest_boundary_time(
                         da_boundary_forcing,
                         time_np
                         + np.timedelta64(
@@ -630,7 +629,8 @@ class ARModel(pl.LightningModule):
                 var_figs = [
                     vis.plot_prediction(
                         datastore=self._datastore,
-                        title=f"{var_name} ({var_unit}), t={t_i} ({self._datastore.step_length * t_i} h)",
+                        title=f"{var_name} ({var_unit}), t={t_i} "
+                        f"({self._datastore.step_length * t_i} h)",
                         vrange=var_vrange,
                         da_prediction=da_prediction.isel(
                             state_feature=var_i, time=t_i - 1
@@ -656,12 +656,14 @@ class ARModel(pl.LightningModule):
 
                 example_i = self.plotted_examples
 
-                wandb.log({
-                    f"{var_name}_example_{example_i}": wandb.Image(fig)
-                    for var_name, fig in zip(
-                        self._datastore.get_vars_names("state"), var_figs
-                    )
-                })
+                wandb.log(
+                    {
+                        f"{var_name}_example_{example_i}": wandb.Image(fig)
+                        for var_name, fig in zip(
+                            self._datastore.get_vars_names("state"), var_figs
+                        )
+                    }
+                )
                 plt.close(
                     "all"
                 )  # Close all figs for this time step, saves memory

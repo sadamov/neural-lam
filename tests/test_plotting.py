@@ -54,7 +54,7 @@ def test_plot_prediction_with_real_config(config_and_datastores):
     target_data = np.random.normal(0, 5, (grid_shape.x, grid_shape.y))
     boundary_data = np.random.normal(0, 5, (boundary_shape.x, boundary_shape.y))
 
-    # Create DataArrays with proper x/y coordinates - without unnecessary third dimension
+    # Create DataArrays with proper x/y coordinates
     da_prediction = xr.DataArray(
         prediction_data,
         dims=["x", "y"],

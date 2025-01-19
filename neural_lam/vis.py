@@ -1,10 +1,9 @@
+# Standard library
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
 # Third-party
 import cartopy.crs as ccrs
-import cartopy.feature as cfeature
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
@@ -47,11 +46,11 @@ class PlotCoordinates:
         """Validate the coordinates after initialization."""
         if not isinstance(self.grid_index, xr.DataArray):
             raise TypeError("grid_index must be an xarray DataArray")
-            
+
         if len(self.feature_names) != len(self.feature_units):
             raise ValueError(
-                f"Number of feature names ({len(self.feature_names)}) must match "
-                f"number of units ({len(self.feature_units)})"
+                f"Number of feature names ({len(self.feature_names)}) must "
+                f"match number of units ({len(self.feature_units)})"
             )
         if (self.x_coords is None) != (self.y_coords is None):
             raise ValueError(
@@ -173,6 +172,8 @@ class Visualizer:
         ------
         ValueError
             If input validation fails
+        TypeError
+            If tensor is not a torch.Tensor
         """
         if not isinstance(tensor, torch.Tensor):
             raise TypeError("tensor must be a torch.Tensor")
@@ -183,17 +184,15 @@ class Visualizer:
         tensor = tensor.detach().cpu().numpy()
         times = np.array(times, dtype="datetime64[ns]")
 
-        # Select appropriate coordinates and datastore
+        # Select appropriate coordinates
         if is_boundary:
             if self._boundary_datastore is None:
                 raise ValueError(
                     "No boundary datastore provided for boundary data"
                 )
             coords = self.boundary_coords
-            datastore = self._boundary_datastore
         else:
             coords = self.interior_coords
-            datastore = self._interior_datastore
 
         # Validate tensor shape
         if len(tensor.shape) not in (2, 3):
@@ -237,7 +236,8 @@ def plot_error_map(
     datastore: BaseRegularGridDatastore,
     title: Optional[str] = None,
 ) -> plt.Figure:
-    """Plot a heatmap of errors of different variables at different prediction horizons.
+    """Plot a heatmap of errors of different variables at different prediction
+    horizons.
 
     Parameters
     ----------
@@ -583,10 +583,12 @@ def plot_spatial_error(
     )
 
     error_grid = (
-        error.reshape([
-            datastore.grid_shape_state.x,
-            datastore.grid_shape_state.y,
-        ])
+        error.reshape(
+            [
+                datastore.grid_shape_state.x,
+                datastore.grid_shape_state.y,
+            ]
+        )
         .T.cpu()
         .numpy()
     )
