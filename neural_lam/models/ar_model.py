@@ -38,6 +38,7 @@ class ARModel(pl.LightningModule):
         self.save_hyperparameters(ignore=["datastore"])
         self.args = args
         self._datastore = datastore
+        self._datastore_boundary = datastore_boundary
         num_state_vars = datastore.get_num_data_vars(category="state")
         num_forcing_vars = datastore.get_num_data_vars(category="forcing")
 
@@ -573,15 +574,12 @@ class ARModel(pl.LightningModule):
                 category="state",
             ).unstack("grid_index")
 
-            if (
-                boundary_slice is not None
-                and self.datastore_boundary is not None
-            ):
+            if (boundary_slice is not None and self.boundary_forced):
                 # Convert time_slice to numpy datetime for comparison
                 time_np = time_slice.cpu().numpy().astype("datetime64[ns]")
 
                 # Reshape boundary forcing to include window dimension
-                num_features = self.datastore_boundary.get_num_data_vars(
+                num_features = self._datastore_boundary.get_num_data_vars(
                     category="forcing"
                 )
                 window_size = (
@@ -630,10 +628,7 @@ class ARModel(pl.LightningModule):
             # Iterate over prediction horizon time steps
             for t_i, _ in enumerate(zip(pred_slice, target_slice), start=1):
                 # For each time step, find closest boundary time if available
-                if (
-                    boundary_slice is not None
-                    and self.datastore_boundary is not None
-                ):
+                if (boundary_slice is not None and self.boundary_forced):
                     da_boundary_t = find_closest_boundary_time(
                         da_boundary_forcing,
                         time_np
@@ -659,7 +654,7 @@ class ARModel(pl.LightningModule):
                         da_boundary=da_boundary_t
                         if da_boundary_t is not None
                         else None,
-                        boundary_datastore=self.datastore_boundary,
+                        boundary_datastore=self._datastore_boundary,
                         boundary_var_map=self.boundary_var_map,
                         state_var_idx=var_i,
                     )
