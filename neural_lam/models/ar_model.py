@@ -44,6 +44,9 @@ class ARModel(pl.LightningModule):
 
         num_past_forcing_steps = args.num_past_forcing_steps
         num_future_forcing_steps = args.num_future_forcing_steps
+        if datastore_boundary is not None:
+            self.num_past_boundary_steps = args.num_past_boundary_steps
+            self.num_future_boundary_steps = args.num_future_boundary_steps
 
         # Load static features for interior
         da_static_features = datastore.get_dataarray(
@@ -152,17 +155,21 @@ class ARModel(pl.LightningModule):
                 "even (sin and cos)"
             )
 
-            num_past_boundary_steps = args.num_past_boundary_steps
-            num_future_boundary_steps = args.num_future_boundary_steps
             self.boundary_dim = (
                 boundary_static_dim
                 # Time delta counts as one additional forcing_feature
-                + (num_boundary_forcing_vars + self.time_delta_enc_dim)
-                * (num_past_boundary_steps + num_future_boundary_steps + 1)
+                + (self.num_boundary_forcing_vars + self.time_delta_enc_dim)
+                * (
+                    self.num_past_boundary_steps
+                    + self.num_future_boundary_steps
+                    + 1
+                )
             )
             # How many of the last boundary forcing dims contain time-deltas
             self.boundary_time_delta_dims = (
-                num_past_boundary_steps + num_future_boundary_steps + 1
+                self.num_past_boundary_steps
+                + self.num_future_boundary_steps
+                + 1
             )
 
             self.num_total_grid_nodes += self.num_boundary_nodes
@@ -574,7 +581,7 @@ class ARModel(pl.LightningModule):
                 category="state",
             ).unstack("grid_index")
 
-            if (boundary_slice is not None and self.boundary_forced):
+            if boundary_slice is not None and self.boundary_forced:
                 # Convert time_slice to numpy datetime for comparison
                 time_np = time_slice.cpu().numpy().astype("datetime64[ns]")
 
@@ -628,7 +635,7 @@ class ARModel(pl.LightningModule):
             # Iterate over prediction horizon time steps
             for t_i, _ in enumerate(zip(pred_slice, target_slice), start=1):
                 # For each time step, find closest boundary time if available
-                if (boundary_slice is not None and self.boundary_forced):
+                if boundary_slice is not None and self.boundary_forced:
                     da_boundary_t = find_closest_boundary_time(
                         da_boundary_forcing,
                         time_np
