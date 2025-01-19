@@ -37,10 +37,13 @@ class DatastoreSelection:
     config_path : str
         The path to the configuration file for the selected datastore, this is
         assumed to be relative to the configuration file for neural-lam.
+    variable_mapping : Dict[str, str]
+        A mapping of variable names to their corresponding names in the datastore.
     """
 
     kind: DatastoreKindStr
-    config_path: str
+    config_path: str 
+    variable_mapping: Dict[str, str] = dataclasses.field(default_factory=dict)
 
 
 @dataclasses.dataclass

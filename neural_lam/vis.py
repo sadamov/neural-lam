@@ -64,10 +64,32 @@ def plot_error_map(errors, datastore: BaseRegularGridDatastore, title=None):
     return fig
 
 
+def find_closest_boundary_time(da_boundary_forcing, target_time):
+    """Find the boundary forcing time closest to the target time.
+
+    Parameters
+    ----------
+    da_boundary_forcing : xarray.DataArray
+        DataArray containing boundary forcing data with a 'window' dimension
+    target_time : numpy.datetime64
+        Target time to find closest match for
+
+    Returns
+    -------
+    xarray.DataArray
+        Boundary forcing data at the closest time
+    """
+    window_times = da_boundary_forcing.window_time_deltas
+    closest_idx = abs(window_times - target_time).argmin()
+    return da_boundary_forcing.isel(window=closest_idx)
+
+
 def plot_on_axis(
     ax,
     da,
     datastore,
+    boundary_da=None,
+    boundary_datastore=None,
     obs_mask=None,
     vmin=None,
     vmax=None,
@@ -76,12 +98,10 @@ def plot_on_axis(
     grid_limits=None,
 ):
     """
-    Plot weather state on given axis
+    Plot weather state on given axis with optional boundary data
     """
-    ax.coastlines()  # Add coastline outlines
-
+    # Plot interior data
     extent = datastore.get_xy_extent("state")
-
     im = da.plot.imshow(
         ax=ax,
         origin="lower",
@@ -91,11 +111,26 @@ def plot_on_axis(
         vmax=vmax,
         cmap=cmap,
         transform=datastore.coords_projection,
+        zorder=2,  # Ensure interior is plotted on top
     )
 
-    if ax_title:
-        ax.set_title(ax_title, size=15)
+    # Plot boundary data if provided
+    if boundary_da is not None and boundary_datastore is not None:
+        boundary_extent = boundary_datastore.get_xy_extent("forcing")
+        boundary_da.plot.imshow(
+            ax=ax,
+            origin="lower",
+            x="x",
+            extent=boundary_extent,
+            vmin=vmin,
+            vmax=vmax,
+            cmap=cmap,
+            transform=boundary_datastore.coords_projection,
+            alpha=0.5,  # Make boundary slightly transparent
+            zorder=1,  # Ensure boundary is plotted below interior
+        )
 
+    ax.coastlines()  # Add coastline outlines
     return im
 
 
@@ -104,19 +139,37 @@ def plot_prediction(
     datastore: BaseRegularGridDatastore,
     da_prediction: xr.DataArray = None,
     da_target: xr.DataArray = None,
+    da_boundary: xr.DataArray = None,
+    boundary_datastore: BaseRegularGridDatastore = None,
+    boundary_var_map: dict = None,  # Add mapping parameter
+    state_var_idx: int = None,  # Add current variable index
     title=None,
     vrange=None,
 ):
     """
-    Plot example prediction and grond truth.
+    Plot example prediction and ground truth with optional boundary data.
 
-    Each has shape (N_grid,)
-
+    Parameters
+    ----------
+    boundary_var_map : dict
+        Mapping from interior variable names to boundary variable names
+    state_var_idx : int
+        Index of the current state variable being plotted
     """
     # Get common scale for values
     if vrange is None:
         vmin = min(da_prediction.min(), da_target.min())
         vmax = max(da_prediction.max(), da_target.max())
+        # Only include boundary in value range if we will plot it
+        if (
+            da_boundary is not None
+            and boundary_var_map
+            and state_var_idx is not None
+        ):
+            state_var_name = datastore.get_vars_names("state")[state_var_idx]
+            if state_var_name in boundary_var_map:
+                vmin = min(vmin, da_boundary.min())
+                vmax = max(vmax, da_boundary.max())
     else:
         vmin, vmax = vrange
 
@@ -127,12 +180,37 @@ def plot_prediction(
         subplot_kw={"projection": datastore.coords_projection},
     )
 
-    # Plot pred and target
+    # Only process boundary data if we have all required components
+    boundary_da_to_plot = None
+    if (
+        da_boundary is not None
+        and boundary_var_map
+        and boundary_datastore is not None
+        and state_var_idx is not None
+    ):
+        state_var_name = datastore.get_vars_names("state")[state_var_idx]
+        if state_var_name in boundary_var_map:
+            boundary_var_name = boundary_var_map[state_var_name]
+            # Find index of boundary variable
+            boundary_vars = boundary_datastore.get_vars_names("forcing")
+            try:
+                boundary_var_idx = boundary_vars.index(boundary_var_name)
+                boundary_da_to_plot = da_boundary.isel(
+                    forcing_feature=boundary_var_idx
+                )
+            except ValueError:
+                print(
+                    f"Warning: Boundary variable {boundary_var_name} not found"
+                )
+
+    # Plot pred and target with boundary
     for ax, da in zip(axes, (da_target, da_prediction)):
         plot_on_axis(
             ax,
             da,
             datastore,
+            boundary_da=boundary_da_to_plot,
+            boundary_datastore=boundary_datastore,
             vmin=vmin,
             vmax=vmax,
         )
@@ -168,9 +246,10 @@ def plot_spatial_error(
     )
 
     error_grid = (
-        error.reshape(
-            [datastore.grid_shape_state.x, datastore.grid_shape_state.y]
-        )
+        error.reshape([
+            datastore.grid_shape_state.x,
+            datastore.grid_shape_state.y,
+        ])
         .T.cpu()
         .numpy()
     )

@@ -200,6 +200,12 @@ class ARModel(pl.LightningModule):
         else:
             self.unroll_ckpt_func = lambda f, *args: f(*args)
 
+        self.boundary_var_map = (
+            config.datastore_boundary.variable_mapping
+            if config.datastore_boundary
+            else {}
+        )
+
     def _create_dataarray_from_tensor(
         self,
         tensor: torch.Tensor,
@@ -535,6 +541,7 @@ class ARModel(pl.LightningModule):
             prediction, target, _, _ = self.common_step(batch)
 
         target = batch[1]
+        boundary_forcing = batch[3]  # Get boundary forcing from batch
         time = batch[-1]
 
         # Rescale to original data scale
@@ -542,9 +549,12 @@ class ARModel(pl.LightningModule):
         target_rescaled = target * self.state_std + self.state_mean
 
         # Iterate over the examples
-        for pred_slice, target_slice, time_slice in zip(
+        for pred_slice, target_slice, boundary_slice, time_slice in zip(
             prediction_rescaled[:n_examples],
             target_rescaled[:n_examples],
+            boundary_forcing[:n_examples]
+            if boundary_forcing is not None
+            else [None] * n_examples,
             time[:n_examples],
         ):
             # Each slice is (pred_steps, num_interior_nodes, d_f)
@@ -563,6 +573,34 @@ class ARModel(pl.LightningModule):
                 category="state",
             ).unstack("grid_index")
 
+            if (
+                boundary_slice is not None
+                and self.datastore_boundary is not None
+            ):
+                # Convert time_slice to numpy datetime for comparison
+                time_np = time_slice.cpu().numpy().astype("datetime64[ns]")
+
+                # Reshape boundary forcing to include window dimension
+                num_features = self.datastore_boundary.get_num_data_vars(
+                    category="forcing"
+                )
+                window_size = (
+                    self.num_past_boundary_steps
+                    + self.num_future_boundary_steps
+                    + 1
+                )
+                boundary_slice_reshaped = boundary_slice.reshape(
+                    -1, window_size, num_features
+                )
+
+                # Create DataArray for boundary data
+                da_boundary_forcing = self._create_dataarray_from_tensor(
+                    tensor=boundary_slice_reshaped,
+                    time=time_slice,
+                    split=split,
+                    category="forcing",
+                )
+
             var_vmin = (
                 torch.minimum(
                     pred_slice.flatten(0, 1).min(dim=0)[0],
@@ -570,7 +608,7 @@ class ARModel(pl.LightningModule):
                 )
                 .cpu()
                 .numpy()
-            )  # (d_f,)
+            )
             var_vmax = (
                 torch.maximum(
                     pred_slice.flatten(0, 1).max(dim=0)[0],
@@ -578,17 +616,39 @@ class ARModel(pl.LightningModule):
                 )
                 .cpu()
                 .numpy()
-            )  # (d_f,)
+            )
+
+            # Also consider boundary data in value ranges if available
+            if boundary_slice is not None:
+                boundary_min = boundary_slice.min()
+                boundary_max = boundary_slice.max()
+                var_vmin = np.minimum(var_vmin, boundary_min.cpu().numpy())
+                var_vmax = np.maximum(var_vmax, boundary_max.cpu().numpy())
+
             var_vranges = list(zip(var_vmin, var_vmax))
 
             # Iterate over prediction horizon time steps
             for t_i, _ in enumerate(zip(pred_slice, target_slice), start=1):
+                # For each time step, find closest boundary time if available
+                if (
+                    boundary_slice is not None
+                    and self.datastore_boundary is not None
+                ):
+                    da_boundary_t = find_closest_boundary_time(
+                        da_boundary_forcing,
+                        time_np
+                        + np.timedelta64(
+                            t_i * self._datastore.step_length, "h"
+                        ),
+                    ).unstack("grid_index")
+                else:
+                    da_boundary_t = None
+
                 # Create one figure per variable at this time step
                 var_figs = [
                     vis.plot_prediction(
                         datastore=self._datastore,
-                        title=f"{var_name} ({var_unit}), "
-                        f"t={t_i} ({self._datastore.step_length * t_i} h)",
+                        title=f"{var_name} ({var_unit}), t={t_i} ({self._datastore.step_length * t_i} h)",
                         vrange=var_vrange,
                         da_prediction=da_prediction.isel(
                             state_feature=var_i, time=t_i - 1
@@ -596,6 +656,12 @@ class ARModel(pl.LightningModule):
                         da_target=da_target.isel(
                             state_feature=var_i, time=t_i - 1
                         ).squeeze(),
+                        da_boundary=da_boundary_t
+                        if da_boundary_t is not None
+                        else None,
+                        boundary_datastore=self.datastore_boundary,
+                        boundary_var_map=self.boundary_var_map,
+                        state_var_idx=var_i,
                     )
                     for var_i, (var_name, var_unit, var_vrange) in enumerate(
                         zip(
@@ -608,14 +674,12 @@ class ARModel(pl.LightningModule):
 
                 example_i = self.plotted_examples
 
-                wandb.log(
-                    {
-                        f"{var_name}_example_{example_i}": wandb.Image(fig)
-                        for var_name, fig in zip(
-                            self._datastore.get_vars_names("state"), var_figs
-                        )
-                    }
-                )
+                wandb.log({
+                    f"{var_name}_example_{example_i}": wandb.Image(fig)
+                    for var_name, fig in zip(
+                        self._datastore.get_vars_names("state"), var_figs
+                    )
+                })
                 plt.close(
                     "all"
                 )  # Close all figs for this time step, saves memory
