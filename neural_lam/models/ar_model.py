@@ -245,12 +245,30 @@ class ARModel(pl.LightningModule):
         # TODO: creating an instance of WeatherDataset here on every call is
         # not how this should be done but whether WeatherDataset should be
         # provided to ARModel or where to put plotting still needs discussion
-        weather_dataset = WeatherDataset(
-            datastore=self._datastore,
-            datastore_boundary=None,
-            split=split,
+
+        # Determine if this is boundary data
+        is_boundary_data = (
+            self.boundary_forced
+            and category == "forcing"
+            and self._datastore_boundary is not None
         )
 
+        # Use correct datastore and boundary datastore
+        datastore = (
+            self._datastore_boundary if is_boundary_data else self._datastore
+        )
+        datastore_boundary = (
+            self._datastore_boundary if not is_boundary_data else None
+        )
+
+        # Create WeatherDataset with appropriate datastores
+        weather_dataset = WeatherDataset(
+            datastore=datastore,
+            datastore_boundary=datastore_boundary,
+            split=split,
+            ar_steps=1,  # Minimal value since we don't need AR steps here
+            standardize=False,  # No need to standardize for plotting
+        )
         # Move to CPU if on GPU
         time = time.detach().cpu()
         time = np.array(time, dtype="datetime64[ns]")
