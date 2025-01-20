@@ -189,32 +189,22 @@ class Visualizer:
         # Move to CPU and convert to numpy
         tensor = tensor.detach().cpu().numpy()
 
-        # Handle times input
+        # Handle times input 
         if isinstance(times, (int, np.integer)):
             # Single time value
             times = np.array([times], dtype="datetime64[ns]")
         elif isinstance(times, torch.Tensor):
             times = times.detach().cpu().numpy().astype("datetime64[ns]")
         else:
+            # Convert list/array to datetime array
+            if not isinstance(times, (list, np.ndarray)):
+                raise TypeError("times must be int, list, numpy array or torch tensor")
             times = np.array(times, dtype="datetime64[ns]")
-
-        # Ensure times matches tensor shape for 3D tensors
-        if len(tensor.shape) == 3:
-            if len(times) != tensor.shape[0]:
-                if len(times) == 1:
-                    # Broadcast single time to match tensor shape
-                    times = np.repeat(times, tensor.shape[0])
-                else:
-                    raise ValueError(
-                        "Number of time points must match first tensor dimension"
-                    )
 
         # Select appropriate coordinates
         if is_boundary:
             if self._boundary_datastore is None:
-                raise ValueError(
-                    "No boundary datastore provided for boundary data"
-                )
+                raise ValueError("No boundary datastore provided for boundary data")
             coords = self.boundary_coords
         else:
             coords = self.interior_coords
@@ -225,18 +215,38 @@ class Visualizer:
             f"{category}_feature": coords.feature_names,
         }
 
-        # Handle time coordinate
-        if len(tensor.shape) == 3:
+        # Check tensor shape and set dimensions
+        if len(tensor.shape) == 2:
+            # Shape: (grid_index, feature)
+            dims = ["grid_index", f"{category}_feature"]
+            if len(times) != 1:
+                raise ValueError(
+                    f"Expected single time value for 2D tensor, got {len(times)}"
+                )
+            # Set time as scalar coordinate
+            coord_dict["time"] = times[0]
+
+        elif len(tensor.shape) == 3:
+            # Shape: (time, grid_index, feature) 
             dims = ["time", "grid_index", f"{category}_feature"]
+            if len(times) == 1:
+                # Broadcast single time value
+                times = np.repeat(times, tensor.shape[0])
+            elif len(times) != tensor.shape[0]:
+                raise ValueError(
+                    f"Number of time points ({len(times)}) must match first tensor "
+                    f"dimension ({tensor.shape[0]})"
+                )
             coord_dict["time"] = times
         else:
-            dims = ["grid_index", f"{category}_feature"]
-            # Assign single time as a scalar coordinate
-            coord_dict["time"] = times[0]
+            raise ValueError(
+                f"Expected 2D or 3D tensor, got shape {tensor.shape}"
+            )
 
         # Create DataArray
         da = xr.DataArray(tensor, dims=dims, coords=coord_dict)
 
+        # Add x/y coordinates if needed
         if not isinstance(da.coords["grid_index"].to_index(), pd.MultiIndex):
             da.coords["x"] = coords.x_coords
             da.coords["y"] = coords.y_coords
