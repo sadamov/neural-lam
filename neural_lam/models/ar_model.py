@@ -563,9 +563,16 @@ class ARModel(pl.LightningModule):
             if boundary_slice is not None and self.boundary_forced:
                 # Convert time_slice to numpy datetime for comparison
                 time_np = time_slice.cpu().numpy().astype("datetime64[ns]")
-
+                # Reshape boundary forcing to match the expected format
+                # Original shape: (pred_steps, num_boundary_nodes, window_size * num_features)
+                # Need shape: (window_size, num_boundary_nodes, num_features)
+                window_size = self.num_past_boundary_steps + self.num_future_boundary_steps + 1
+                num_features = boundary_slice.shape[-1] // window_size
+                boundary_slice_reshaped = boundary_slice.view(-1, self.num_boundary_nodes, window_size, num_features)
+                boundary_slice_reshaped = boundary_slice_reshaped.permute(2, 1, 3)  # (window_size, num_boundary_nodes, num_features)
+                
                 da_boundary_forcing = self._create_dataarray_from_tensor(
-                    tensor=boundary_slice,
+                    tensor=boundary_slice_reshaped,
                     time=time_slice,
                     split=split,
                     category="forcing",
