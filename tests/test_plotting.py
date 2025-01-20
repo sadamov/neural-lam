@@ -100,15 +100,23 @@ def test_visualizer_tensor_conversion(visualizer):
     grid_points = visualizer._interior_datastore.num_grid_points
     n_features = len(visualizer._interior_datastore.get_vars_names("state"))
 
-    # Create properly sized tensor
-    tensor = torch.randn(grid_points, n_features)
-    times = [np.datetime64("2023-01-01")]
+    # Create properly sized tensor and keep as torch.Tensor
+    tensor = torch.randn(grid_points, n_features)  # Keep as torch.Tensor
+    times = [np.datetime64("2023-01-01")]  # Single time value
 
     # Valid conversion
     da = visualizer.tensor_to_dataarray(tensor, times, "state")
     assert isinstance(da, xr.DataArray)
     assert "grid_index" in da.dims
     assert "state_feature" in da.dims
+
+    # Test 3D tensor
+    tensor_3d = torch.randn(2, grid_points, n_features)  # (time, grid, feat)
+    times_3d = [np.datetime64("2023-01-01"), np.datetime64("2023-01-02")]
+    da_3d = visualizer.tensor_to_dataarray(tensor_3d, times_3d, "state")
+    assert isinstance(da_3d, xr.DataArray)
+    assert "time" in da_3d.dims
+    assert len(da_3d.time) == 2
 
     # Invalid category
     with pytest.raises(ValueError):

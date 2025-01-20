@@ -153,7 +153,7 @@ class Visualizer:
         self,
         tensor: torch.Tensor,
         times: Union[int, List[int], torch.Tensor],
-        category: str, 
+        category: str,
         is_boundary: bool = False,
     ) -> xr.DataArray:
         """Convert tensor to DataArray with proper coordinates.
@@ -180,13 +180,15 @@ class Visualizer:
             raise ValueError("category must be 'state' or 'forcing'")
 
         print(f"DEBUG: Input tensor shape: {tensor.shape}")
-        print(f"DEBUG: Times length: {len(times) if hasattr(times, '__len__') else 1}")
+        print(
+            f"DEBUG: Times length: {len(times) if hasattr(times, '__len__') else 1}"
+        )
         print(f"DEBUG: Category: {category}")
         print(f"DEBUG: Is boundary: {is_boundary}")
 
         # Move to CPU and convert to numpy
         tensor = tensor.detach().cpu().numpy()
-        
+
         # Handle times input
         if isinstance(times, (int, np.integer)):
             times = np.array([times], dtype="datetime64[ns]")
@@ -194,7 +196,9 @@ class Visualizer:
             times = times.detach().cpu().numpy().astype("datetime64[ns]")
         else:
             if not isinstance(times, (list, np.ndarray)):
-                raise TypeError("times must be int, list, numpy array or torch tensor")
+                raise TypeError(
+                    "times must be int, list, numpy array or torch tensor"
+                )
             times = np.array(times, dtype="datetime64[ns]")
 
         # Select appropriate coordinates
@@ -202,29 +206,35 @@ class Visualizer:
 
         # Validate input tensor dimensions
         if len(tensor.shape) not in (2, 3):
-            raise ValueError(f"Expected 2D or 3D tensor, got shape {tensor.shape}")
-            
+            raise ValueError(
+                f"Expected 2D or 3D tensor, got shape {tensor.shape}"
+            )
+
         print(f"DEBUG: Raw tensor shape: {tensor.shape}")
 
         # For 3D tensors, verify dimensions match expected order
         if len(tensor.shape) == 3:
             time_size, grid_size, feat_size = tensor.shape
             expected_grid_size = (
-                coords.grid_index.size if coords.grid_index is not None else None
+                coords.grid_index.size
+                if coords.grid_index is not None
+                else None
             )
             if expected_grid_size and grid_size != expected_grid_size:
                 raise ValueError(
                     f"Grid dimension size {grid_size} does not match expected "
                     f"size {expected_grid_size}"
                 )
-                
+
             if time_size != len(times):
                 raise ValueError(
                     f"Time dimension size {time_size} does not match number of "
                     f"time points {len(times)}"
                 )
-                
-            print(f"DEBUG: Grid size validation - got: {grid_size}, expected: {expected_grid_size}")
+
+            print(
+                f"DEBUG: Grid size validation - got: {grid_size}, expected: {expected_grid_size}"
+            )
             print(f"DEBUG: Feature size: {feat_size}")
 
         # Add debug checks for feature names/dimensions
@@ -255,7 +265,12 @@ class Visualizer:
             coord_dict["time"] = times
 
         print(f"DEBUG: Final dims: {dims}")
-        print(f"DEBUG: Coord dict shapes: {[(k, v.shape) for k,v in coord_dict.items()]}")
+        print("DEBUG: Coord dict info:")
+        for k, v in coord_dict.items():
+            if hasattr(v, "shape"):
+                print(f"  {k}: shape={v.shape}")
+            else:
+                print(f"  {k}: len={len(v)}")
 
         # Create DataArray
         da = xr.DataArray(tensor, dims=dims, coords=coord_dict)
@@ -451,7 +466,7 @@ def plot_prediction(
     da_prediction: Optional[xr.DataArray] = None,
     da_target: Optional[xr.DataArray] = None,
     da_boundary: Optional[xr.DataArray] = None,
-    boundary_datastore: Optional[BaseRegularGridGridDatastore] = None,
+    boundary_datastore: Optional[BaseRegularGridDatastore] = None,
     boundary_var_map: Optional[Dict[str, str]] = None,
     state_var_idx: Optional[int] = None,
     title: Optional[str] = None,
@@ -605,10 +620,12 @@ def plot_spatial_error(
     )
 
     error_grid = (
-        error.reshape([
-            datastore.grid_shape_state.x,
-            datastore.grid_shape_state.y,
-        ])
+        error.reshape(
+            [
+                datastore.grid_shape_state.x,
+                datastore.grid_shape_state.y,
+            ]
+        )
         .T.cpu()
         .numpy()
     )
