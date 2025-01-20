@@ -564,13 +564,29 @@ class ARModel(pl.LightningModule):
                 # Convert time_slice to numpy datetime for comparison
                 time_np = time_slice.cpu().numpy().astype("datetime64[ns]")
                 # Reshape boundary forcing to match the expected format
-                # Original shape: (pred_steps, num_boundary_nodes, window_size * num_features)
-                # Need shape: (window_size, num_boundary_nodes, num_features)
-                window_size = self.num_past_boundary_steps + self.num_future_boundary_steps + 1
+                window_size = (
+                    self.num_past_boundary_steps
+                    + self.num_future_boundary_steps
+                    + 1
+                )
                 num_features = boundary_slice.shape[-1] // window_size
-                boundary_slice_reshaped = boundary_slice.view(-1, self.num_boundary_nodes, window_size, num_features)
-                boundary_slice_reshaped = boundary_slice_reshaped.permute(2, 1, 3)  # (window_size, num_boundary_nodes, num_features)
-                
+
+                # Reshape into (pred_steps, num_boundary_nodes, window_size,
+                # num_features)
+                boundary_slice_reshaped = boundary_slice.view(
+                    boundary_slice.shape[0],  # pred_steps
+                    self.num_boundary_nodes,
+                    window_size,
+                    num_features,
+                )
+                # Move window dimension first while preserving order of other
+                # dimensions: (pred_steps, num_boundary_nodes, window_size,
+                # num_features) -> (window_size, pred_steps, num_boundary_nodes,
+                # num_features)
+                boundary_slice_reshaped = boundary_slice_reshaped.permute(
+                    2, 0, 1, 3
+                )
+
                 da_boundary_forcing = self._create_dataarray_from_tensor(
                     tensor=boundary_slice_reshaped,
                     time=time_slice,
@@ -608,13 +624,18 @@ class ARModel(pl.LightningModule):
             for t_i, _ in enumerate(zip(pred_slice, target_slice), start=1):
                 # For each time step, find closest boundary time if available
                 if boundary_slice is not None and self.boundary_forced:
-                    da_boundary_t = vis.find_closest_boundary_time(
-                        da_boundary_forcing,
-                        time_np
-                        + np.timedelta64(
-                            t_i * self._datastore.step_length, "h"
-                        ),
-                    ).unstack("grid_index")
+                    target_time = time_np + np.timedelta64(
+                        t_i * self._datastore.step_length, "h"
+                    )
+
+                    # Find closest boundary time slice and select window=0
+                    da_boundary_forcing_t = vis.find_closest_boundary_time(
+                        da_boundary_forcing, target_time
+                    ).isel(window=self.num_past_boundary_steps)
+
+                    # Unstack the grid index to get spatial coordinates
+                    da_boundary_t = da_boundary_forcing_t.unstack("grid_index")
+
                 else:
                     da_boundary_t = None
 

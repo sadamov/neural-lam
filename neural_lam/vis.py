@@ -209,9 +209,11 @@ class Visualizer:
             dims = ["grid_index", "window", f"{category}_feature"]
             grid_size, window_size, feat_size = tensor.shape
 
-            coord_dict.update({
-                "window": np.arange(window_size),
-            })
+            coord_dict.update(
+                {
+                    "window": np.arange(window_size),
+                }
+            )
 
             # Time becomes a scalar coordinate for boundary data
             if len(times) != 1:
@@ -225,7 +227,8 @@ class Visualizer:
                 dims = ["grid_index", f"{category}_feature"]
                 if len(times) != 1:
                     raise ValueError(
-                        f"Expected single time value for 2D tensor, got {len(times)}"
+                        f"Expected single time value for 2D tensor, "
+                        f"got {len(times)}"
                     )
                 coord_dict["time"] = times[0]
             else:
@@ -249,8 +252,8 @@ class Visualizer:
         datastore: BaseRegularGridDatastore,
         title: Optional[str] = None,
     ) -> plt.Figure:
-        """Plot a heatmap of errors of different variables at different prediction
-        horizons.
+        """Plot a heatmap of errors of different variables at different
+        prediction horizons.
 
         Parameters
         ----------
@@ -582,10 +585,12 @@ def plot_spatial_error(
     )
 
     error_grid = (
-        error.reshape([
-            datastore.grid_shape_state.x,
-            datastore.grid_shape_state.y,
-        ])
+        error.reshape(
+            [
+                datastore.grid_shape_state.x,
+                datastore.grid_shape_state.y,
+            ]
+        )
         .T.cpu()
         .numpy()
     )
