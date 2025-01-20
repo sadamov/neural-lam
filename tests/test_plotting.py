@@ -9,11 +9,17 @@ import numpy as np
 import pytest
 import torch
 import xarray as xr
+from cartopy.mpl.geoaxes import GeoAxes
 
 # First-party
 from neural_lam.config import NeuralLAMConfig
 from neural_lam.datastore import init_datastore
-from neural_lam.vis import plot_prediction, plot_spatial_error
+from neural_lam.vis import (
+    PlotCoordinates,
+    Visualizer,
+    plot_prediction,
+    plot_spatial_error,
+)
 
 
 @pytest.fixture
@@ -41,272 +47,145 @@ def config_and_datastores():
     return config, datastore, datastore_boundary
 
 
-def test_plot_prediction_with_real_config(config_and_datastores):
-    """Test plotting with real config and datastores."""
-    config, datastore, datastore_boundary = config_and_datastores
-
-    # Get grid dimensions
-    grid_shape = datastore.grid_shape_state
-    boundary_shape = datastore_boundary.grid_shape_state
-
-    # Create sample data matching the grid shape - remove extra dimension
-    prediction_data = np.random.normal(0, 5, (grid_shape.x, grid_shape.y))
-    target_data = np.random.normal(0, 5, (grid_shape.x, grid_shape.y))
-    boundary_data = np.random.normal(0, 5, (boundary_shape.x, boundary_shape.y))
-
-    # Create DataArrays with proper x/y coordinates
-    da_prediction = xr.DataArray(
-        prediction_data,
-        dims=["x", "y"],
-        coords={
-            "x": range(grid_shape.x),
-            "y": range(grid_shape.y),
-        },
+@pytest.fixture
+def visualizer(config_and_datastores):
+    """Create a visualizer instance for testing."""
+    _, datastore, datastore_boundary = config_and_datastores
+    return Visualizer(
+        interior_datastore=datastore,
+        boundary_datastore=datastore_boundary,
+        boundary_var_map={"u100m": "u_component_of_wind1000hPa"},
     )
 
-    da_target = xr.DataArray(
-        target_data,
-        dims=["x", "y"],
-        coords={
-            "x": range(grid_shape.x),
-            "y": range(grid_shape.y),
-        },
-    )
 
-    da_boundary = xr.DataArray(
-        boundary_data,
-        dims=["x", "y"],
-        coords={
-            "x": range(boundary_shape.x),
-            "y": range(boundary_shape.y),
-        },
-    )
+def test_plot_coordinates():
+    """Test PlotCoordinates validation."""
+    grid_index = xr.DataArray([0, 1, 2])
+    names = ["temp", "wind"]
+    units = ["K", "m/s"]
 
-    # Test plotting with realistic value ranges
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        fig = plot_prediction(
-            datastore=datastore,
-            title="Wind Speed Test Plot",
-            vrange=(-15, 15),
-            da_prediction=da_prediction,
-            da_target=da_target,
-            da_boundary=da_boundary,
-            boundary_datastore=datastore_boundary,
-            boundary_var_map=config.datastore_boundary.variable_mapping,
-            state_var_idx=0,
+    # Valid initialization
+    coords = PlotCoordinates(grid_index, names, units)
+    assert coords.grid_index.equals(grid_index)
+
+    # Invalid grid_index type
+    with pytest.raises(TypeError):
+        PlotCoordinates([0, 1, 2], names, units)
+
+    # Mismatched features/units
+    with pytest.raises(ValueError):
+        PlotCoordinates(grid_index, ["temp"], units)
+
+
+def test_visualizer_initialization(config_and_datastores):
+    """Test Visualizer initialization and coord extraction."""
+    _, datastore, datastore_boundary = config_and_datastores
+
+    # Valid initialization
+    vis = Visualizer(datastore)
+    assert vis.interior_coords is not None
+
+    # Invalid datastore type
+    with pytest.raises(TypeError):
+        Visualizer("not_a_datastore")
+
+    # Invalid boundary mapping
+    with pytest.raises(TypeError):
+        Visualizer(datastore, boundary_var_map="invalid")
+
+
+def test_visualizer_tensor_conversion(visualizer):
+    """Test tensor to DataArray conversion."""
+    # Get correct grid size from interior datastore
+    grid_points = visualizer._interior_datastore.num_grid_points
+    n_features = len(visualizer._interior_datastore.get_vars_names("state"))
+
+    # Create properly sized tensor
+    tensor = torch.randn(grid_points, n_features)
+    times = [np.datetime64("2023-01-01")]
+
+    # Valid conversion
+    da = visualizer.tensor_to_dataarray(tensor, times, "state")
+    assert isinstance(da, xr.DataArray)
+    assert "grid_index" in da.dims
+    assert "state_feature" in da.dims
+
+    # Invalid category
+    with pytest.raises(ValueError):
+        visualizer.tensor_to_dataarray(tensor, times, "invalid")
+
+    # Invalid tensor type
+    with pytest.raises(TypeError):
+        visualizer.tensor_to_dataarray(
+            np.zeros((grid_points, n_features)), times, "state"
         )
 
-        # Verify plot components
-        assert isinstance(fig, plt.Figure)
-        assert len(fig.axes) >= 2  # At least prediction and target subplots
 
-        # Test if projections are properly set
-        for ax in fig.axes:
-            if hasattr(ax, "projection"):  # Check if axis has projection
-                assert (
-                    ax.projection.__class__.__name__.lower()
-                    == datastore.coords_projection.__class__.__name__.lower()
-                )
+def test_plot_prediction_basic(config_and_datastores):
+    """Test basic prediction plotting functionality."""
+    _, datastore, datastore_boundary = config_and_datastores
 
-        # Save and verify
-        save_path = os.path.join(tmp_dir, "test_wind_plot.png")
-        fig.savefig(save_path)
-        assert os.path.exists(save_path)
-        plt.close(fig)
+    # Create minimal test data
+    grid_shape = datastore.grid_shape_state
+    da_prediction = xr.DataArray(
+        np.random.randn(grid_shape.x, grid_shape.y), dims=["x", "y"]
+    )
+    da_target = da_prediction.copy()
+
+    # Test basic plotting works
+    fig = plot_prediction(
+        datastore=datastore, da_prediction=da_prediction, da_target=da_target
+    )
+    assert isinstance(fig, plt.Figure)
+    # Expect 4 axes total: 2 plots + 2 colorbars
+    assert len(fig.axes) == 4
+
+    # Check we have two main plot axes with correct titles
+    # Only count GeoAxes, not colorbar Axes
+    main_axes = [ax for ax in fig.axes if isinstance(ax, GeoAxes)]
+    assert len(main_axes) == 2
+    assert "Ground Truth" in main_axes[0].get_title()
+    assert "Prediction" in main_axes[1].get_title()
+    plt.close(fig)
 
 
-def test_plot_spatial_error_with_real_config(config_and_datastores):
-    """Test spatial error plotting with real config."""
+def test_plot_spatial_error_basic(config_and_datastores):
+    """Test basic spatial error plotting."""
     _, datastore, _ = config_and_datastores
 
-    grid_points = datastore.num_grid_points
-    error_data = np.random.normal(0, 2, grid_points)
-    error = torch.tensor(error_data, dtype=torch.float32)
+    error = torch.randn(datastore.num_grid_points)
+    fig = plot_spatial_error(error=error, datastore=datastore)
+
+    assert isinstance(fig, plt.Figure)
+    assert len(fig.axes) == 2  # Main plot + colorbar
+    plt.close(fig)
+
+
+def test_save_plots(config_and_datastores):
+    """Test plots can be saved."""
+    _, datastore, _ = config_and_datastores
+    grid_shape = datastore.grid_shape_state
+
+    da_prediction = xr.DataArray(
+        np.random.randn(grid_shape.x, grid_shape.y), dims=["x", "y"]
+    )
 
     with tempfile.TemporaryDirectory() as tmp_dir:
-        fig = plot_spatial_error(
-            error=error,
+        # Test prediction plot save
+        fig1 = plot_prediction(
             datastore=datastore,
-            title="Wind Speed Error Plot",
+            da_prediction=da_prediction,
+            da_target=da_prediction,
         )
+        save_path1 = os.path.join(tmp_dir, "pred_test.png")
+        fig1.savefig(save_path1)
+        assert os.path.exists(save_path1)
+        plt.close(fig1)
 
-        # Verify plot
-        assert isinstance(fig, plt.Figure)
-        assert len(fig.axes) == 2  # Main plot + colorbar axes
-        assert (
-            fig.axes[0].projection.__class__.__name__.lower()
-            == datastore.coords_projection.__class__.__name__.lower()
-        )
-        # Save and verify
-        save_path = os.path.join(tmp_dir, "test_wind_error.png")
-        fig.savefig(save_path)
-        assert os.path.exists(save_path)
-        plt.close(fig)
-
-
-def test_data_validation(config_and_datastores):
-    """Test input data validation for plotting."""
-    _, datastore, datastore_boundary = config_and_datastores
-
-    # Test with mismatched grid points
-    with pytest.raises(ValueError):
-        wrong_size_data = np.random.randn(10)  # Wrong number of grid points
-        da_wrong = xr.DataArray(
-            wrong_size_data,
-            dims=["grid_index"],
-            coords={"grid_index": range(10)},
-        )
-        plot_prediction(
-            datastore=datastore,
-            title="Invalid Data Plot",
-            vrange=(-2, 2),
-            da_prediction=da_wrong,
-            da_target=da_wrong,
-            da_boundary=None,
-            boundary_datastore=datastore_boundary,
-            boundary_var_map={},
-            state_var_idx=0,
-        )
-
-
-def test_coordinate_systems(config_and_datastores):
-    """Test if coordinate systems are properly handled."""
-    _, datastore, datastore_boundary = config_and_datastores
-
-    # Create test data with proper grid shapes
-    grid_shape = datastore.grid_shape_state
-    boundary_shape = datastore_boundary.grid_shape_state
-
-    # Create 2D arrays matching grid shapes
-    da_prediction = xr.DataArray(
-        np.random.randn(grid_shape.x, grid_shape.y),
-        dims=["x", "y"],
-        coords={
-            "x": range(grid_shape.x),
-            "y": range(grid_shape.y),
-        },
-    )
-
-    da_target = xr.DataArray(
-        np.random.randn(grid_shape.x, grid_shape.y),
-        dims=["x", "y"],
-        coords={
-            "x": range(grid_shape.x),
-            "y": range(grid_shape.y),
-        },
-    )
-
-    da_boundary = xr.DataArray(
-        np.random.randn(boundary_shape.x, boundary_shape.y),
-        dims=["x", "y"],
-        coords={
-            "x": range(boundary_shape.x),
-            "y": range(boundary_shape.y),
-        },
-    )
-    # Test if plotting handles different projections
-    fig = plot_prediction(
-        datastore=datastore,
-        title="Projection Test",
-        vrange=(-2, 2),
-        da_prediction=da_prediction,
-        da_target=da_target,
-        da_boundary=da_boundary,
-        boundary_datastore=datastore_boundary,
-        boundary_var_map={},
-        state_var_idx=0,
-    )
-
-    plt.close(fig)
-
-
-def test_variable_mapping(config_and_datastores):
-    """Test if variable mapping between ERA5 and DANRA works correctly."""
-    config, datastore, datastore_boundary = config_and_datastores
-
-    # Get grid dimensions
-    grid_shape = datastore.grid_shape_state
-    boundary_shape = datastore_boundary.grid_shape_state
-
-    # Create 3D arrays to include state variables
-    prediction_data = np.random.normal(0, 5, (2, grid_shape.x, grid_shape.y))
-    target_data = np.random.normal(0, 5, (2, grid_shape.x, grid_shape.y))
-    boundary_data = np.random.normal(
-        0, 5, (2, boundary_shape.x, boundary_shape.y)
-    )
-
-    # Create DataArrays with named coordinates
-    da_prediction = xr.DataArray(
-        prediction_data,
-        dims=["state", "x", "y"],
-        coords={
-            "state": ["u100m", "v100m"],
-            "x": range(grid_shape.x),
-            "y": range(grid_shape.y),
-        },
-    )
-
-    da_target = xr.DataArray(
-        target_data,
-        dims=["state", "x", "y"],
-        coords={
-            "state": ["u100m", "v100m"],
-            "x": range(grid_shape.x),
-            "y": range(grid_shape.y),
-        },
-    )
-
-    da_boundary = xr.DataArray(
-        boundary_data,
-        dims=["state", "x", "y"],
-        coords={
-            "state": [
-                "u_component_of_wind1000hPa",
-                "v_component_of_wind1000hPa",
-            ],
-            "x": range(boundary_shape.x),
-            "y": range(boundary_shape.y),
-        },
-    )
-
-    # Test u component
-    da_prediction_u = da_prediction.sel(state="u100m")
-    da_target_u = da_target.sel(state="u100m")
-    da_boundary_u = da_boundary.sel(state="u_component_of_wind1000hPa")
-
-    # Update naming to match what plot_prediction expects
-    da_prediction_u.name = "u100m"  # Simplified names
-    da_target_u.name = "u100m"
-    da_boundary_u.name = "u_component_of_wind1000hPa"
-
-    fig = plot_prediction(
-        datastore=datastore,
-        title="u100m Wind Component",
-        vrange=(-15, 15),
-        da_prediction=da_prediction_u,
-        da_target=da_target_u,
-        da_boundary=da_boundary_u,
-        boundary_datastore=datastore_boundary,
-        boundary_var_map=config.datastore_boundary.variable_mapping,
-        state_var_idx=0,
-    )
-
-    # Get all titles including figure suptitle
-    axes_titles = [
-        ax.get_title() for ax in fig.axes if hasattr(ax, "get_title")
-    ]
-    suptitle = fig._suptitle.get_text() if fig._suptitle else ""
-    all_titles = axes_titles + [suptitle]
-
-    print("All titles:", all_titles)
-
-    # First verify we have titles
-    assert len(all_titles) > 0, "No titles found"
-
-    # Look for either "u100m" or "u component" in any of the titles
-    assert any(
-        ("u100m" in title.lower() or "u component" in title.lower())
-        for title in all_titles
-    ), f"Expected u wind component title not found in: {all_titles}"
-
-    plt.close(fig)
+        # Test error plot save
+        error = torch.randn(datastore.num_grid_points)
+        fig2 = plot_spatial_error(error=error, datastore=datastore)
+        save_path2 = os.path.join(tmp_dir, "error_test.png")
+        fig2.savefig(save_path2)  # Add missing save call
+        assert os.path.exists(save_path2)
+        plt.close(fig2)

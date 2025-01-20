@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import xarray as xr
+import pandas as pd
 
 # Local
 from . import utils
@@ -83,6 +84,11 @@ class Visualizer:
             boundary_datastore, BaseDatastore
         ):
             raise TypeError("boundary_datastore must be a BaseDatastore")
+        # Add type checking for boundary_var_map
+        if boundary_var_map is not None and not isinstance(
+            boundary_var_map, dict
+        ):
+            raise TypeError("boundary_var_map must be a dictionary")
 
         self._interior_datastore = interior_datastore
         self._boundary_datastore = boundary_datastore
@@ -202,29 +208,26 @@ class Visualizer:
                 "Number of time points must match first tensor dimension"
             )
 
-        # Create dimensions list based on tensor shape
-        dims = []
-        if len(tensor.shape) == 3:
-            dims.append("time")
-        dims.extend(["grid_index", f"{category}_feature"])
-
         # Build coordinates dict
         coord_dict = {
             "grid_index": coords.grid_index,
             f"{category}_feature": coords.feature_names,
         }
+
+        # Handle time coordinate
         if len(tensor.shape) == 3:
+            dims = ["time", "grid_index", f"{category}_feature"]
             coord_dict["time"] = times
-        elif len(tensor.shape) == 2:
-            coord_dict["time"] = times[0] if isinstance(times, list) else times
+        else:
+            dims = ["grid_index", f"{category}_feature"]
+            # Assign single time as a scalar coordinate
+            coord_dict["time"] = times[0]
 
         # Create DataArray
         da = xr.DataArray(tensor, dims=dims, coords=coord_dict)
 
-        # Add spatial coordinates if available
-        if coords.x_coords is not None:
+        if not isinstance(da.coords["grid_index"].to_index(), pd.MultiIndex):
             da.coords["x"] = coords.x_coords
-        if coords.y_coords is not None:
             da.coords["y"] = coords.y_coords
 
         return da
@@ -337,13 +340,10 @@ def plot_on_axis(
     datastore: BaseRegularGridDatastore,
     boundary_da: Optional[xr.DataArray] = None,
     boundary_datastore: Optional[BaseRegularGridDatastore] = None,
-    obs_mask: Optional[np.ndarray] = None,
     vmin: Optional[float] = None,
     vmax: Optional[float] = None,
-    ax_title: Optional[str] = None,
     cmap: str = "plasma",
-    grid_limits: Optional[Tuple[float, float]] = None,
-) -> plt.Axes:
+) -> plt.Artist:
     """Plot weather state on given axis with optional boundary data.
 
     Parameters
@@ -358,30 +358,17 @@ def plot_on_axis(
         Boundary data to plot
     boundary_datastore : BaseRegularGridDatastore, optional
         Datastore containing boundary data
-    obs_mask : np.ndarray, optional
-        Observation mask
     vmin : float, optional
         Minimum value for color scale
     vmax : float, optional
         Maximum value for color scale
-    ax_title : str, optional
-        Title for the axis
     cmap : str, optional
         Colormap to use
-    grid_limits : Tuple[float, float], optional
-        Limits for the grid
 
     Returns
     -------
-    plt.Axes
-        The axis with the plot
-
-    Raises
-    ------
-    TypeError
-        If ax is not a matplotlib Axes object
-    ValueError
-        If boundary_da is provided without boundary_datastore
+    plt.Artist
+        The plotted image artist
     """
     if not isinstance(ax, plt.Axes):
         raise TypeError("ax must be a matplotlib Axes object")
@@ -583,12 +570,10 @@ def plot_spatial_error(
     )
 
     error_grid = (
-        error.reshape(
-            [
-                datastore.grid_shape_state.x,
-                datastore.grid_shape_state.y,
-            ]
-        )
+        error.reshape([
+            datastore.grid_shape_state.x,
+            datastore.grid_shape_state.y,
+        ])
         .T.cpu()
         .numpy()
     )
