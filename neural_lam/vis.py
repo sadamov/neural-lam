@@ -179,13 +179,6 @@ class Visualizer:
         if category not in ("state", "forcing"):
             raise ValueError("category must be 'state' or 'forcing'")
 
-        print(f"DEBUG: Input tensor shape: {tensor.shape}")
-        print(
-            f"DEBUG: Times length: {len(times) if hasattr(times, '__len__') else 1}"
-        )
-        print(f"DEBUG: Category: {category}")
-        print(f"DEBUG: Is boundary: {is_boundary}")
-
         # Move to CPU and convert to numpy
         tensor = tensor.detach().cpu().numpy()
 
@@ -204,74 +197,21 @@ class Visualizer:
         # Select appropriate coordinates
         coords = self.boundary_coords if is_boundary else self.interior_coords
 
-        # Validate input tensor dimensions
-        if len(tensor.shape) not in (2, 3):
-            raise ValueError(
-                f"Expected 2D or 3D tensor, got shape {tensor.shape}"
-            )
-
-        print(f"DEBUG: Raw tensor shape: {tensor.shape}")
-
-        # For 3D tensors, verify dimensions match expected order
-        if len(tensor.shape) == 3:
-            time_size, grid_size, feat_size = tensor.shape
-            expected_grid_size = (
-                coords.grid_index.size
-                if coords.grid_index is not None
-                else None
-            )
-            if expected_grid_size and grid_size != expected_grid_size:
-                raise ValueError(
-                    f"Grid dimension size {grid_size} does not match expected "
-                    f"size {expected_grid_size}"
-                )
-
-            if time_size != len(times):
-                raise ValueError(
-                    f"Time dimension size {time_size} does not match number of "
-                    f"time points {len(times)}"
-                )
-
-            print(
-                f"DEBUG: Grid size validation - got: {grid_size}, expected: {expected_grid_size}"
-            )
-            print(f"DEBUG: Feature size: {feat_size}")
-
-        # Add debug checks for feature names/dimensions
-        print(f"DEBUG: Feature names length: {len(coords.feature_names)}")
-        if is_boundary:
-            print(f"DEBUG: Boundary forcing features: {coords.feature_names}")
-            print(f"DEBUG: Boundary mapping: {self.boundary_var_map}")
-        print(f"DEBUG: Coordinate grid size: {coords.grid_index.size}")
-
-        # Build coordinates dict with validated dimensions
+        # Build coordinates dict
         coord_dict = {
             "grid_index": coords.grid_index,
             f"{category}_feature": coords.feature_names,
         }
 
-        # For boundary data, handle (grid_index, window, feature) shape
+        # Handle boundary data with window dimension
         if is_boundary and len(tensor.shape) == 3:
-            grid_size, window_size, feat_size = tensor.shape
-            expected_grid_size = (
-                coords.grid_index.size
-                if coords.grid_index is not None
-                else None
-            )
-
-            if expected_grid_size and grid_size != expected_grid_size:
-                raise ValueError(
-                    f"Grid dimension size {grid_size} does not match expected "
-                    f"size {expected_grid_size} for boundary data"
-                )
-
-            # For boundary data, keep original shape and add time coordinate
+            # For boundary data with shape (grid_index, window, feature)
             dims = ["grid_index", "window", f"{category}_feature"]
-            coord_dict = {
-                "grid_index": coords.grid_index,
-                "window": np.arange(window_size),  # Window indices
-                f"{category}_feature": coords.feature_names,
-            }
+            grid_size, window_size, feat_size = tensor.shape
+
+            coord_dict.update({
+                "window": np.arange(window_size),
+            })
 
             # Time becomes a scalar coordinate for boundary data
             if len(times) != 1:
@@ -279,8 +219,7 @@ class Visualizer:
             coord_dict["time"] = times[0]
 
         else:
-            # Handle non-boundary data as before
-            # Set dimensions based on tensor shape
+            # Handle regular data
             if len(tensor.shape) == 2:
                 # Shape: (grid_index, feature)
                 dims = ["grid_index", f"{category}_feature"]
@@ -290,17 +229,9 @@ class Visualizer:
                     )
                 coord_dict["time"] = times[0]
             else:
-                # Shape: (time, grid_index, feature) for both interior and boundary
+                # Shape: (time, grid_index, feature)
                 dims = ["time", "grid_index", f"{category}_feature"]
                 coord_dict["time"] = times
-
-        print(f"DEBUG: Final dims: {dims}")
-        print("DEBUG: Coord dict info:")
-        for k, v in coord_dict.items():
-            if hasattr(v, "shape"):
-                print(f"  {k}: shape={v.shape}")
-            else:
-                print(f"  {k}: len={len(v)}")
 
         # Create DataArray
         da = xr.DataArray(tensor, dims=dims, coords=coord_dict)
@@ -312,84 +243,85 @@ class Visualizer:
 
         return da
 
+    @matplotlib.rc_context(utils.fractional_plot_bundle(1))
+    def plot_error_map(
+        errors: Union[np.ndarray, torch.Tensor],
+        datastore: BaseRegularGridDatastore,
+        title: Optional[str] = None,
+    ) -> plt.Figure:
+        """Plot a heatmap of errors of different variables at different prediction
+        horizons.
 
-@matplotlib.rc_context(utils.fractional_plot_bundle(1))
-def plot_error_map(
-    errors: Union[np.ndarray, torch.Tensor],
-    datastore: BaseRegularGridDatastore,
-    title: Optional[str] = None,
-) -> plt.Figure:
-    """Plot a heatmap of errors of different variables at different prediction
-    horizons.
+        Parameters
+        ----------
+        errors : Union[np.ndarray, torch.Tensor]
+            Array of errors to plot
+        datastore : BaseRegularGridDatastore
+            Datastore containing the data
+        title : str, optional
+            Title for the plot
 
-    Parameters
-    ----------
-    errors : Union[np.ndarray, torch.Tensor]
-        Array of errors to plot
-    datastore : BaseRegularGridDatastore
-        Datastore containing the data
-    title : str, optional
-        Title for the plot
+        Returns
+        -------
+        plt.Figure
+            The resulting figure
 
-    Returns
-    -------
-    plt.Figure
-        The resulting figure
+        Raises
+        ------
+        TypeError
+            If errors is not a numpy array or torch tensor
+        """
+        if not isinstance(errors, (np.ndarray, torch.Tensor)):
+            raise TypeError("errors must be numpy array or torch tensor")
 
-    Raises
-    ------
-    TypeError
-        If errors is not a numpy array or torch tensor
-    """
-    if not isinstance(errors, (np.ndarray, torch.Tensor)):
-        raise TypeError("errors must be numpy array or torch tensor")
+        errors_np = errors.T.cpu().numpy()  # (d_f, pred_steps)
+        d_f, pred_steps = errors_np.shape
+        step_length = datastore.step_length
 
-    errors_np = errors.T.cpu().numpy()  # (d_f, pred_steps)
-    d_f, pred_steps = errors_np.shape
-    step_length = datastore.step_length
+        # Normalize all errors to [0,1] for color map
+        max_errors = errors_np.max(axis=1)  # d_f
+        errors_norm = errors_np / np.expand_dims(max_errors, axis=1)
 
-    # Normalize all errors to [0,1] for color map
-    max_errors = errors_np.max(axis=1)  # d_f
-    errors_norm = errors_np / np.expand_dims(max_errors, axis=1)
+        fig, ax = plt.subplots(figsize=(15, 10))
 
-    fig, ax = plt.subplots(figsize=(15, 10))
+        ax.imshow(
+            errors_norm,
+            cmap="OrRd",
+            vmin=0,
+            vmax=1.0,
+            interpolation="none",
+            aspect="auto",
+            alpha=0.8,
+        )
 
-    ax.imshow(
-        errors_norm,
-        cmap="OrRd",
-        vmin=0,
-        vmax=1.0,
-        interpolation="none",
-        aspect="auto",
-        alpha=0.8,
-    )
+        # ax and labels
+        for (j, i), error in np.ndenumerate(errors_np):
+            # Numbers > 9999 will be too large to fit
+            formatted_error = f"{error:.3f}" if error < 9999 else f"{error:.2E}"
+            ax.text(
+                i, j, formatted_error, ha="center", va="center", usetex=False
+            )
 
-    # ax and labels
-    for (j, i), error in np.ndenumerate(errors_np):
-        # Numbers > 9999 will be too large to fit
-        formatted_error = f"{error:.3f}" if error < 9999 else f"{error:.2E}"
-        ax.text(i, j, formatted_error, ha="center", va="center", usetex=False)
+        # Ticks and labels
+        label_size = 15
+        ax.set_xticks(np.arange(pred_steps))
+        pred_hor_i = np.arange(pred_steps) + 1  # Prediction horiz. in index
+        pred_hor_h = step_length * pred_hor_i  # Prediction horiz. in hours
+        ax.set_xticklabels(pred_hor_h, size=label_size)
+        ax.set_xlabel("Lead time (h)", size=label_size)
 
-    # Ticks and labels
-    label_size = 15
-    ax.set_xticks(np.arange(pred_steps))
-    pred_hor_i = np.arange(pred_steps) + 1  # Prediction horiz. in index
-    pred_hor_h = step_length * pred_hor_i  # Prediction horiz. in hours
-    ax.set_xticklabels(pred_hor_h, size=label_size)
-    ax.set_xlabel("Lead time (h)", size=label_size)
+        ax.set_yticks(np.arange(d_f))
+        var_names = datastore.get_vars_names(category="state")
+        var_units = datastore.get_vars_units(category="state")
+        y_ticklabels = [
+            f"{name} ({unit})" for name, unit in zip(var_names, var_units)
+        ]
+        ax.set_yticklabels(y_ticklabels, rotation=30, size=label_size)
 
-    ax.set_yticks(np.arange(d_f))
-    var_names = datastore.get_vars_names(category="state")
-    var_units = datastore.get_vars_units(category="state")
-    y_ticklabels = [
-        f"{name} ({unit})" for name, unit in zip(var_names, var_units)
-    ]
-    ax.set_yticklabels(y_ticklabels, rotation=30, size=label_size)
+        if title:
+            ax.set_title(title, size=15)
 
-    if title:
-        ax.set_title(title, size=15)
-
-    return fig
+        return fig
 
 
 def find_closest_boundary_time(
@@ -650,12 +582,10 @@ def plot_spatial_error(
     )
 
     error_grid = (
-        error.reshape(
-            [
-                datastore.grid_shape_state.x,
-                datastore.grid_shape_state.y,
-            ]
-        )
+        error.reshape([
+            datastore.grid_shape_state.x,
+            datastore.grid_shape_state.y,
+        ])
         .T.cpu()
         .numpy()
     )
