@@ -162,10 +162,10 @@ class Visualizer:
         ----------
         tensor : torch.Tensor
             Data tensor to convert
-        times : Union[int, List[int]]
+        times : Union[int, List[int], torch.Tensor]
             Time points in nanoseconds since epoch
         category : str
-            Data category ('state' or 'forcing')
+            Data category ('state' or 'forcing') 
         is_boundary : bool, optional
             Whether this is boundary data
 
@@ -173,25 +173,21 @@ class Visualizer:
         -------
         xr.DataArray
             DataArray with proper coordinates
-
-        Raises
-        ------
-        ValueError
-            If input validation fails
-        TypeError
-            If tensor is not a torch.Tensor
         """
         if not isinstance(tensor, torch.Tensor):
             raise TypeError("tensor must be a torch.Tensor")
         if category not in ("state", "forcing"):
             raise ValueError("category must be 'state' or 'forcing'")
 
+        print(f"DEBUG: Input tensor shape: {tensor.shape}")
+        print(f"DEBUG: Number of time points: {len(times) if hasattr(times, '__len__') else 1}")
+        
         # Move to CPU and convert to numpy
         tensor = tensor.detach().cpu().numpy()
 
-        # Handle times input 
+        # Handle times input
         if isinstance(times, (int, np.integer)):
-            # Single time value
+            # Single time value 
             times = np.array([times], dtype="datetime64[ns]")
         elif isinstance(times, torch.Tensor):
             times = times.detach().cpu().numpy().astype("datetime64[ns]")
@@ -202,19 +198,14 @@ class Visualizer:
             times = np.array(times, dtype="datetime64[ns]")
 
         # Select appropriate coordinates
-        if is_boundary:
-            if self._boundary_datastore is None:
-                raise ValueError("No boundary datastore provided for boundary data")
-            coords = self.boundary_coords
-        else:
-            coords = self.interior_coords
+        coords = self.boundary_coords if is_boundary else self.interior_coords
 
         # Build coordinates dict
         coord_dict = {
             "grid_index": coords.grid_index,
             f"{category}_feature": coords.feature_names,
         }
-
+        
         # Check tensor shape and set dimensions
         if len(tensor.shape) == 2:
             # Shape: (grid_index, feature)
@@ -227,17 +218,33 @@ class Visualizer:
             coord_dict["time"] = times[0]
 
         elif len(tensor.shape) == 3:
-            # Shape: (time, grid_index, feature) 
+            # Shape: (time, grid_index, feature)
             dims = ["time", "grid_index", f"{category}_feature"]
+            
+            print(f"DEBUG: Tensor shape before time check: {tensor.shape}")
+            
             if len(times) == 1:
                 # Broadcast single time value
                 times = np.repeat(times, tensor.shape[0])
             elif len(times) != tensor.shape[0]:
-                raise ValueError(
-                    f"Number of time points ({len(times)}) must match first tensor "
-                    f"dimension ({tensor.shape[0]})"
-                )
+                # Only raise error if time dimension is first 
+                if tensor.shape[0] > tensor.shape[1] and tensor.shape[0] > tensor.shape[2]:
+                    print(f"DEBUG: Attempting to reshape tensor of shape {tensor.shape}")
+                    # Try reshaping the tensor to match time dimension
+                    new_shape = (len(times), -1, tensor.shape[-1])
+                    try:
+                        tensor = tensor.reshape(new_shape)
+                        print(f"DEBUG: Successfully reshaped tensor to {tensor.shape}")
+                    except:
+                        print(f"DEBUG: Failed to reshape tensor to {new_shape}")
+                if len(times) != tensor.shape[0]:
+                    raise ValueError(
+                        f"Number of time points ({len(times)}) must match first tensor "
+                        f"dimension ({tensor.shape[0]})"
+                    )
+            
             coord_dict["time"] = times
+
         else:
             raise ValueError(
                 f"Expected 2D or 3D tensor, got shape {tensor.shape}"
@@ -250,6 +257,9 @@ class Visualizer:
         if not isinstance(da.coords["grid_index"].to_index(), pd.MultiIndex):
             da.coords["x"] = coords.x_coords
             da.coords["y"] = coords.y_coords
+
+        print(f"DEBUG: Final DataArray shape: {da.shape}")
+        print(f"DEBUG: Final DataArray dims: {da.dims}")
 
         return da
 
