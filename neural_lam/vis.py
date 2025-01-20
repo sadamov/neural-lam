@@ -250,19 +250,49 @@ class Visualizer:
             f"{category}_feature": coords.feature_names,
         }
 
-        # Set dimensions based on tensor shape
-        if len(tensor.shape) == 2:
-            # Shape: (grid_index, feature)
-            dims = ["grid_index", f"{category}_feature"]
-            if len(times) != 1:
+        # For boundary data, handle (grid_index, window, feature) shape
+        if is_boundary and len(tensor.shape) == 3:
+            grid_size, window_size, feat_size = tensor.shape
+            expected_grid_size = (
+                coords.grid_index.size
+                if coords.grid_index is not None
+                else None
+            )
+
+            if expected_grid_size and grid_size != expected_grid_size:
                 raise ValueError(
-                    f"Expected single time value for 2D tensor, got {len(times)}"
+                    f"Grid dimension size {grid_size} does not match expected "
+                    f"size {expected_grid_size} for boundary data"
                 )
+
+            # For boundary data, keep original shape and add time coordinate
+            dims = ["grid_index", "window", f"{category}_feature"]
+            coord_dict = {
+                "grid_index": coords.grid_index,
+                "window": np.arange(window_size),  # Window indices
+                f"{category}_feature": coords.feature_names,
+            }
+
+            # Time becomes a scalar coordinate for boundary data
+            if len(times) != 1:
+                raise ValueError("Boundary data requires single time value")
             coord_dict["time"] = times[0]
+
         else:
-            # Shape: (time, grid_index, feature) for both interior and boundary
-            dims = ["time", "grid_index", f"{category}_feature"]
-            coord_dict["time"] = times
+            # Handle non-boundary data as before
+            # Set dimensions based on tensor shape
+            if len(tensor.shape) == 2:
+                # Shape: (grid_index, feature)
+                dims = ["grid_index", f"{category}_feature"]
+                if len(times) != 1:
+                    raise ValueError(
+                        f"Expected single time value for 2D tensor, got {len(times)}"
+                    )
+                coord_dict["time"] = times[0]
+            else:
+                # Shape: (time, grid_index, feature) for both interior and boundary
+                dims = ["time", "grid_index", f"{category}_feature"]
+                coord_dict["time"] = times
 
         print(f"DEBUG: Final dims: {dims}")
         print("DEBUG: Coord dict info:")

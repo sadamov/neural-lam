@@ -564,22 +564,8 @@ class ARModel(pl.LightningModule):
                 # Convert time_slice to numpy datetime for comparison
                 time_np = time_slice.cpu().numpy().astype("datetime64[ns]")
 
-                # Reshape boundary forcing to include window dimension
-                num_features = self._datastore_boundary.get_num_data_vars(
-                    category="forcing"
-                )
-                window_size = (
-                    self.num_past_boundary_steps
-                    + self.num_future_boundary_steps
-                    + 1
-                )
-                boundary_slice_reshaped = boundary_slice.reshape(
-                    -1, window_size, num_features
-                )
-
-                # Create DataArray for boundary data
                 da_boundary_forcing = self._create_dataarray_from_tensor(
-                    tensor=boundary_slice_reshaped,
+                    tensor=boundary_slice,
                     time=time_slice,
                     split=split,
                     category="forcing",
