@@ -7,9 +7,9 @@ import cartopy.crs as ccrs
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import torch
 import xarray as xr
-import pandas as pd
 
 # Local
 from . import utils
@@ -570,10 +570,12 @@ def plot_spatial_error(
     )
 
     error_grid = (
-        error.reshape([
-            datastore.grid_shape_state.x,
-            datastore.grid_shape_state.y,
-        ])
+        error.reshape(
+            [
+                datastore.grid_shape_state.x,
+                datastore.grid_shape_state.y,
+            ]
+        )
         .T.cpu()
         .numpy()
     )
