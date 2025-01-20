@@ -188,9 +188,26 @@ class Visualizer:
 
         # Move to CPU and convert to numpy
         tensor = tensor.detach().cpu().numpy()
-        if isinstance(times, torch.Tensor):
-            times = times.detach().cpu().numpy()
-        times = np.array(times, dtype="datetime64[ns]")
+
+        # Handle times input
+        if isinstance(times, (int, np.integer)):
+            # Single time value
+            times = np.array([times], dtype="datetime64[ns]")
+        elif isinstance(times, torch.Tensor):
+            times = times.detach().cpu().numpy().astype("datetime64[ns]")
+        else:
+            times = np.array(times, dtype="datetime64[ns]")
+
+        # Ensure times matches tensor shape for 3D tensors
+        if len(tensor.shape) == 3:
+            if len(times) != tensor.shape[0]:
+                if len(times) == 1:
+                    # Broadcast single time to match tensor shape
+                    times = np.repeat(times, tensor.shape[0])
+                else:
+                    raise ValueError(
+                        "Number of time points must match first tensor dimension"
+                    )
 
         # Select appropriate coordinates
         if is_boundary:
@@ -201,14 +218,6 @@ class Visualizer:
             coords = self.boundary_coords
         else:
             coords = self.interior_coords
-
-        # Validate tensor shape
-        if len(tensor.shape) not in (2, 3):
-            raise ValueError("tensor must be 2D or 3D")
-        if len(tensor.shape) == 3 and tensor.shape[0] != len(times):
-            raise ValueError(
-                "Number of time points must match first tensor dimension"
-            )
 
         # Build coordinates dict
         coord_dict = {
@@ -572,12 +581,10 @@ def plot_spatial_error(
     )
 
     error_grid = (
-        error.reshape(
-            [
-                datastore.grid_shape_state.x,
-                datastore.grid_shape_state.y,
-            ]
-        )
+        error.reshape([
+            datastore.grid_shape_state.x,
+            datastore.grid_shape_state.y,
+        ])
         .T.cpu()
         .numpy()
     )
