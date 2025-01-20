@@ -152,7 +152,7 @@ class Visualizer:
     def tensor_to_dataarray(
         self,
         tensor: torch.Tensor,
-        times: Union[int, List[int]],
+        times: Union[int, List[int], torch.Tensor],
         category: str,
         is_boundary: bool = False,
     ) -> xr.DataArray:
@@ -188,6 +188,8 @@ class Visualizer:
 
         # Move to CPU and convert to numpy
         tensor = tensor.detach().cpu().numpy()
+        if isinstance(times, torch.Tensor):
+            times = times.detach().cpu().numpy()
         times = np.array(times, dtype="datetime64[ns]")
 
         # Select appropriate coordinates
