@@ -541,8 +541,6 @@ class ARModel(pl.LightningModule):
             ).unstack("grid_index")
 
             if boundary_slice is not None and self.boundary_forced:
-                # Convert time_slice to numpy datetime for comparison
-                time_np = time_slice.cpu().numpy().astype("datetime64[ns]")
                 # Reshape boundary forcing to match the expected format
                 window_size = (
                     self.num_past_boundary_steps
@@ -552,15 +550,17 @@ class ARModel(pl.LightningModule):
                 num_features = boundary_slice.shape[-1] // window_size
 
                 # Only select the "non-windowed" entry for each feature
+                # (i.e. the boundary forcing at the current time step)
+                # Start: num_past_boundary_steps (-> window=0)
+                # End: (num_features - 1) * window_size (-> every feature at
+                # window=0; last feature is time_delta)
+                # Step: window_size (-> only every window_size-th feature)
                 boundary_slice_no_window = boundary_slice[
                     :,
                     :,
-                    self.num_past_boundary_steps : num_features
+                    self.num_past_boundary_steps : (num_features - 1)
                     * window_size : window_size,
                 ]
-
-                print("DEBUG: Plotting boundary forcing")
-                print(f"Boundary forcing: {boundary_slice_no_window.shape}")
 
                 da_boundary_forcing = self.plot_manager.tensor_to_dataarray(
                     tensor=boundary_slice_no_window,
@@ -568,6 +568,8 @@ class ARModel(pl.LightningModule):
                     category="forcing",
                     is_boundary=True,
                 )
+
+                da_boundary_t = da_boundary_forcing
 
             var_vmin = (
                 torch.minimum(
@@ -597,20 +599,11 @@ class ARModel(pl.LightningModule):
 
             # Iterate over prediction horizon time steps
             for t_i, _ in enumerate(zip(pred_slice, target_slice), start=1):
-                # For each time step, find closest boundary time if available
                 if boundary_slice is not None and self.boundary_forced:
-                    target_time = time_np + np.timedelta64(
-                        t_i * self._datastore.step_length, "h"
-                    )
-
-                    # Find closest boundary time slice and select window=0
-                    da_boundary_forcing_t = vis.find_closest_boundary_time(
-                        da_boundary_forcing, target_time
-                    ).isel(window=self.num_past_boundary_steps)
-
                     # Unstack the grid index to get spatial coordinates
-                    da_boundary_t = da_boundary_forcing_t.unstack("grid_index")
-
+                    da_boundary_t = da_boundary_forcing.isel(
+                        time=t_i - 1
+                    ).unstack("grid_index")
                 else:
                     da_boundary_t = None
 

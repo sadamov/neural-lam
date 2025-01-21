@@ -615,3 +615,20 @@ class BaseRegularGridDatastore(BaseDatastore):
 
         """
         return self.grid_shape_state.x * self.grid_shape_state.y
+
+    def get_xy_extent(self, category: str) -> List[float]:
+        """Get the extent of the grid in x/y coordinates.
+        
+        Falls back to lon/lat if x/y not available.
+        """
+        try:
+            xy = self.get_xy(category, stacked=True)
+            x_min, y_min = xy.min(axis=0)
+            x_max, y_max = xy.max(axis=0)
+        except (AttributeError, ValueError):
+            # Fallback to lon/lat if x/y not available
+            ll = self.get_lat_lon(category)
+            x_min, y_min = ll.min(axis=0)
+            x_max, y_max = ll.max(axis=0)
+        
+        return [x_min, x_max, y_min, y_max]

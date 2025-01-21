@@ -56,42 +56,41 @@ def plot_manager(config_and_datastores):  # Renamed from visualizer
     )
 
 
-def test_plot_data_manager():  # Renamed from test_plot_metadata
+def test_plot_data_manager(config_and_datastores):
     """Test PlotDataManager initialization and validation."""
-    grid_index = xr.DataArray([0, 1, 2])
-    names = ["temp", "wind"]
-    units = ["K", "m/s"]
+    _, datastore, _ = config_and_datastores
 
-    # Valid initialization
-    metadata = PlotDataManager(
-        grid_index, names, units, dims=("time", "x", "y")
-    )  # Updated class name
-    assert metadata.grid_index.equals(grid_index)
-
-    # Invalid grid_index type
-    with pytest.raises(TypeError):
-        PlotDataManager([0, 1, 2], names, units, dims=("time", "x", "y"))
-
-    # Mismatched features/units
-    with pytest.raises(ValueError):
-        PlotDataManager(grid_index, ["temp"], units, dims=("time", "x", "y"))
-
-
-def test_visualizer_initialization(config_and_datastores):
-    """Test Visualizer initialization and coord extraction."""
-    _, datastore, datastore_boundary = config_and_datastores
-
-    # Valid initialization
-    vis = PlotDataManager(datastore)
-    assert vis.coords_interior is not None
+    # Valid initialization with datastore
+    plot_manager = PlotDataManager(interior_datastore=datastore)
+    assert plot_manager.metadata_interior is not None
+    assert "dims" in plot_manager.metadata_interior
 
     # Invalid datastore type
     with pytest.raises(TypeError):
-        PlotDataManager("not_a_datastore")
+        PlotDataManager(interior_datastore="not_a_datastore")
 
-    # Invalid boundary mapping
+    # Invalid boundary var map type
     with pytest.raises(TypeError):
-        PlotDataManager(datastore, boundary_var_map="invalid")
+        PlotDataManager(interior_datastore=datastore, boundary_var_map="invalid")
+
+
+def test_visualizer_initialization(config_and_datastores):
+    """Test Visualizer initialization and metadata extraction."""
+    _, datastore, datastore_boundary = config_and_datastores
+
+    # Valid initialization
+    vis = PlotDataManager(interior_datastore=datastore)
+    assert vis.metadata_interior is not None
+    assert "grid_index" in vis.metadata_interior
+    assert "feature_names" in vis.metadata_interior
+
+    # Test with boundary datastore
+    vis = PlotDataManager(
+        interior_datastore=datastore,
+        boundary_datastore=datastore_boundary,
+        boundary_var_map={"u100m": "u_component_of_wind1000hPa"},
+    )
+    assert vis.metadata_boundary is not None
 
 
 def test_visualizer_tensor_conversion(plot_manager):
@@ -100,23 +99,30 @@ def test_visualizer_tensor_conversion(plot_manager):
     grid_points = plot_manager._interior_datastore.num_grid_points
     n_features = len(plot_manager._interior_datastore.get_vars_names("state"))
 
-    # Create properly sized tensor and keep as torch.Tensor
-    tensor = torch.randn(grid_points, n_features)  # Keep as torch.Tensor
-    times = [np.datetime64("2023-01-01")]  # Single time value
+    # Test 2D tensor - needs expansion to match expected 3D format
+    tensor_2d = torch.randn(grid_points, n_features)
+    tensor = tensor_2d.unsqueeze(0)  # Add time dimension: (1, grid_points, n_features)
+    times = torch.tensor([np.datetime64("2023-01-01").astype(np.int64)])
 
     # Valid conversion
     da = plot_manager.tensor_to_dataarray(tensor, times, "state")
     assert isinstance(da, xr.DataArray)
     assert "grid_index" in da.dims
     assert "state_feature" in da.dims
+    assert "time" in da.dims
 
-    # Test 3D tensor
-    tensor_3d = torch.randn(2, grid_points, n_features)  # (time, grid, feat)
-    times_3d = [np.datetime64("2023-01-01"), np.datetime64("2023-01-02")]
+    # Test 3D tensor with multiple timesteps
+    tensor_3d = torch.randn(2, grid_points, n_features)  # (time, grid, feature)
+    times_3d = torch.tensor([
+        np.datetime64("2023-01-01").astype(np.int64),
+        np.datetime64("2023-01-02").astype(np.int64),
+    ])
     da_3d = plot_manager.tensor_to_dataarray(tensor_3d, times_3d, "state")
     assert isinstance(da_3d, xr.DataArray)
     assert "time" in da_3d.dims
     assert len(da_3d.time) == 2
+    assert "grid_index" in da_3d.dims
+    assert "state_feature" in da_3d.dims
 
     # Invalid category
     with pytest.raises(ValueError):
@@ -125,7 +131,7 @@ def test_visualizer_tensor_conversion(plot_manager):
     # Invalid tensor type
     with pytest.raises(TypeError):
         plot_manager.tensor_to_dataarray(
-            np.zeros((grid_points, n_features)), times, "state"
+            np.zeros((1, grid_points, n_features)), times, "state" 
         )
 
 

@@ -290,28 +290,6 @@ def plot_error_map(
     return fig
 
 
-def find_closest_boundary_time(
-    da_boundary_forcing: xr.DataArray, target_time: np.datetime64
-) -> xr.DataArray:
-    """Find the boundary forcing time closest to the target time.
-
-    Parameters
-    ----------
-    da_boundary_forcing : xr.DataArray
-        DataArray containing boundary forcing data with a 'window' dimension
-    target_time : np.datetime64
-        Target time to find closest match for
-
-    Returns
-    -------
-    xr.DataArray
-        Boundary forcing data at the closest time
-    """
-    window_times = da_boundary_forcing.window_time_deltas
-    closest_idx = abs(window_times - target_time).argmin()
-    return da_boundary_forcing.isel(window=closest_idx)
-
-
 def plot_on_axis(
     ax: plt.Axes,
     da: xr.DataArray,
@@ -359,7 +337,7 @@ def plot_on_axis(
     im = da.plot.imshow(
         ax=ax,
         origin="lower",
-        x="x",
+        x="x" if "x" in da.coords else None,  # Make x coordinate optional
         extent=extent,
         vmin=vmin,
         vmax=vmax,
@@ -370,19 +348,22 @@ def plot_on_axis(
 
     # Plot boundary data if provided
     if boundary_da is not None and boundary_datastore is not None:
-        boundary_extent = boundary_datastore.get_xy_extent("forcing")
-        boundary_da.plot.imshow(
-            ax=ax,
-            origin="lower",
-            x="x",
-            extent=boundary_extent,
-            vmin=vmin,
-            vmax=vmax,
-            cmap=cmap,
-            transform=boundary_datastore.coords_projection,
-            alpha=0.5,  # Make boundary slightly transparent
-            zorder=1,  # Ensure boundary is plotted below interior
-        )
+        try:
+            boundary_extent = boundary_datastore.get_xy_extent("forcing")
+            boundary_da.plot.imshow(
+                ax=ax,
+                origin="lower",
+                x="x" if "x" in boundary_da.coords else None,
+                extent=boundary_extent,
+                vmin=vmin,
+                vmax=vmax,
+                cmap=cmap,
+                transform=boundary_datastore.coords_projection,
+                alpha=0.5,  # Make boundary slightly transparent
+                zorder=1,  # Ensure boundary is plotted below interior
+            )
+        except AttributeError as e:
+            print(f"Warning: Could not plot boundary data: {e}")
 
     ax.coastlines()  # Add coastline outlines
     return im
