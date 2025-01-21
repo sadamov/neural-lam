@@ -1,9 +1,7 @@
 # Standard library
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union
 
 # Third-party
-import cartopy.crs as ccrs
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
@@ -16,51 +14,12 @@ from . import utils
 from .datastore.base import BaseDatastore, BaseRegularGridDatastore
 
 
-@dataclass
-class PlotCoordinates:
-    """Container for coordinate information needed for plotting.
+class PlotDataManager:
+    """Handles data preparation and metadata management for plotting.
 
-    Parameters
-    ----------
-    grid_index : xr.DataArray
-        Grid indices for the data points
-    feature_names : list[str]
-        Names of the features in the data
-    feature_units : list[str]
-        Units for each feature
-    x_coords : xr.DataArray, optional
-        X coordinates of data points
-    y_coords : xr.DataArray, optional
-        Y coordinates of data points
-    projection : ccrs.Projection, optional
-        Cartographic projection to use
-    """
-
-    grid_index: xr.DataArray
-    feature_names: List[str]
-    feature_units: List[str]
-    x_coords: Optional[xr.DataArray] = None
-    y_coords: Optional[xr.DataArray] = None
-    projection: Optional[ccrs.Projection] = None
-
-    def __post_init__(self):
-        """Validate the coordinates after initialization."""
-        if not isinstance(self.grid_index, xr.DataArray):
-            raise TypeError("grid_index must be an xarray DataArray")
-
-        if len(self.feature_names) != len(self.feature_units):
-            raise ValueError(
-                f"Number of feature names ({len(self.feature_names)}) must "
-                f"match number of units ({len(self.feature_units)})"
-            )
-        if (self.x_coords is None) != (self.y_coords is None):
-            raise ValueError(
-                "Both x_coords and y_coords must be provided together"
-            )
-
-
-class Visualizer:
-    """Handles conversion of tensors to plotable arrays with coordinates.
+    This class manages metadata and coordinates for plotting weather data,
+    including both interior and boundary data. It provides functionality to
+    convert tensors to xarray DataArrays with proper coordinates and metadata.
 
     Parameters
     ----------
@@ -69,6 +28,15 @@ class Visualizer:
     boundary_datastore : BaseDatastore, optional
         Datastore containing boundary data
     boundary_var_map : Dict[str, str], optional
+        Mapping between interior and boundary variable names
+
+    Attributes
+    ----------
+    metadata_interior : Dict[str, Any]
+        Metadata for interior domain plotting
+    metadata_boundary : Optional[Dict[str, Any]]
+        Metadata for boundary domain plotting, if boundary_datastore provided
+    boundary_var_map : Dict[str, str]
         Mapping between interior and boundary variable names
     """
 
@@ -84,7 +52,6 @@ class Visualizer:
             boundary_datastore, BaseDatastore
         ):
             raise TypeError("boundary_datastore must be a BaseDatastore")
-        # Add type checking for boundary_var_map
         if boundary_var_map is not None and not isinstance(
             boundary_var_map, dict
         ):
@@ -94,237 +61,233 @@ class Visualizer:
         self._boundary_datastore = boundary_datastore
         self.boundary_var_map = boundary_var_map or {}
 
-        # Cache coordinate information
-        self.interior_coords = self._extract_coords(interior_datastore, "state")
+        # Extract metadata
+        self.metadata_interior = self._extract_metadata(
+            interior_datastore, "state"
+        )
         if boundary_datastore:
             try:
-                self.boundary_coords = self._extract_coords(
+                self.metadata_boundary = self._extract_metadata(
                     boundary_datastore, "forcing"
                 )
             except Exception as e:
-                raise RuntimeError(
-                    "Failed to extract boundary coordinates"
-                ) from e
+                raise RuntimeError("Failed to extract boundary metadata") from e
         else:
-            self.boundary_coords = None
+            self.metadata_boundary = None
+
+    @property
+    def dims_interior(self) -> Tuple[str, ...]:
+        """Get interior dimension names.
+
+        Returns
+        -------
+        Tuple[str, ...]
+            Dimension names for interior data
+        """
+        return self.metadata_interior["dims"]
+
+    @property
+    def dims_boundary(self) -> Optional[Tuple[str, ...]]:
+        """Get boundary dimension names.
+
+        Returns
+        -------
+        Optional[Tuple[str, ...]]
+            Dimension names for boundary data, None if no boundary data
+        """
+        return (
+            self.metadata_boundary["dims"] if self.metadata_boundary else None
+        )
 
     @staticmethod
-    def _extract_coords(
+    def _extract_metadata(
         datastore: BaseDatastore, category: str
-    ) -> PlotCoordinates:
-        """Extract coordinate information from a datastore.
+    ) -> Dict[str, Any]:
+        """Extract metadata information from a datastore.
 
         Parameters
         ----------
         datastore : BaseDatastore
-            The datastore to extract coordinates from
+            The datastore to extract metadata from
         category : str
             Data category to extract ('state' or 'forcing')
 
         Returns
         -------
-        PlotCoordinates
-            Container with extracted coordinate information
+        Dict[str, Any]
+            Dictionary containing metadata:
+            - grid_index: xr.DataArray
+            - feature_names: List[str]
+            - feature_units: List[str]
+            - x_coords: Optional[xr.DataArray]
+            - y_coords: Optional[xr.DataArray]
+            - projection: Optional[ccrs.Projection]
+            - dims: Tuple[str, ...]
 
         Raises
         ------
         ValueError
-            If required data is missing from datastore
+            If required data is missing from datastore or extraction fails
         """
         da = datastore.get_dataarray(category=category, split="train")
         if da is None:
             raise ValueError(f"No {category} data found in datastore")
 
         try:
-            return PlotCoordinates(
-                grid_index=da.grid_index,
-                feature_names=datastore.get_vars_names(category),
-                feature_units=datastore.get_vars_units(category),
-                x_coords=da.x if "x" in da.coords else None,
-                y_coords=da.y if "y" in da.coords else None,
-                projection=getattr(datastore, "coords_projection", None),
-            )
+            return {
+                "grid_index": da.grid_index,
+                "feature_names": datastore.get_vars_names(category),
+                "feature_units": datastore.get_vars_units(category),
+                "x_coords": da.x if "x" in da.coords else None,
+                "y_coords": da.y if "y" in da.coords else None,
+                "projection": getattr(datastore, "coords_projection", None),
+                "dims": tuple(da.dims),
+            }
         except Exception as e:
             raise ValueError(
-                f"Failed to extract coordinates for {category}"
+                f"Failed to extract metadata for {category}"
             ) from e
 
     def tensor_to_dataarray(
         self,
         tensor: torch.Tensor,
-        times: Union[int, List[int], torch.Tensor],
+        times: torch.Tensor,
         category: str,
         is_boundary: bool = False,
     ) -> xr.DataArray:
-        """Convert tensor to DataArray with proper coordinates.
+        """Convert tensor to DataArray with proper coordinates and metadata.
 
         Parameters
         ----------
         tensor : torch.Tensor
             Data tensor to convert
-        times : Union[int, List[int], torch.Tensor]
+        times : torch.Tensor
             Time points in nanoseconds since epoch
         category : str
             Data category ('state' or 'forcing')
         is_boundary : bool, optional
-            Whether this is boundary data
+            Whether this is boundary data (to use boundary metadata)
 
         Returns
         -------
         xr.DataArray
-            DataArray with proper coordinates
+            DataArray with proper coordinates, dimensions and metadata
+
+        Raises
+        ------
+        TypeError
+            If tensor is not a torch.Tensor
+        ValueError
+            If category is invalid or required metadata missing
         """
         if not isinstance(tensor, torch.Tensor):
             raise TypeError("tensor must be a torch.Tensor")
         if category not in ("state", "forcing"):
             raise ValueError("category must be 'state' or 'forcing'")
 
+        metadata = (
+            self.metadata_boundary if is_boundary else self.metadata_interior
+        )
+
         # Move to CPU and convert to numpy
         tensor = tensor.detach().cpu().numpy()
-
-        # Handle times input
-        if isinstance(times, (int, np.integer)):
-            times = np.array([times], dtype="datetime64[ns]")
-        elif isinstance(times, torch.Tensor):
-            times = times.detach().cpu().numpy().astype("datetime64[ns]")
-        else:
-            if not isinstance(times, (list, np.ndarray)):
-                raise TypeError(
-                    "times must be int, list, numpy array or torch tensor"
-                )
-            times = np.array(times, dtype="datetime64[ns]")
-
-        # Select appropriate coordinates
-        coords = self.boundary_coords if is_boundary else self.interior_coords
+        times = times.detach().cpu().numpy().astype("datetime64[ns]")
 
         # Build coordinates dict
         coord_dict = {
-            "grid_index": coords.grid_index,
-            f"{category}_feature": coords.feature_names,
+            "time": times,
+            "grid_index": metadata["grid_index"],
+            f"{category}_feature": metadata["feature_names"],
         }
 
-        # Handle boundary data with window dimension
-        if is_boundary and len(tensor.shape) == 3:
-            # For boundary data with shape (grid_index, window, feature)
-            dims = ["grid_index", "window", f"{category}_feature"]
-            grid_size, window_size, feat_size = tensor.shape
-
-            coord_dict.update(
-                {
-                    "window": np.arange(window_size),
-                }
-            )
-
-            # Time becomes a scalar coordinate for boundary data
-            if len(times) != 1:
-                raise ValueError("Boundary data requires single time value")
-            coord_dict["time"] = times[0]
-
-        else:
-            # Handle regular data
-            if len(tensor.shape) == 2:
-                # Shape: (grid_index, feature)
-                dims = ["grid_index", f"{category}_feature"]
-                if len(times) != 1:
-                    raise ValueError(
-                        f"Expected single time value for 2D tensor, "
-                        f"got {len(times)}"
-                    )
-                coord_dict["time"] = times[0]
-            else:
-                # Shape: (time, grid_index, feature)
-                dims = ["time", "grid_index", f"{category}_feature"]
-                coord_dict["time"] = times
-
-        # Create DataArray
-        da = xr.DataArray(tensor, dims=dims, coords=coord_dict)
+        # Create DataArray with dims from metadata
+        da = xr.DataArray(tensor, dims=metadata["dims"], coords=coord_dict)
 
         # Add x/y coordinates if needed
         if not isinstance(da.coords["grid_index"].to_index(), pd.MultiIndex):
-            da.coords["x"] = coords.x_coords
-            da.coords["y"] = coords.y_coords
+            da.coords["x"] = metadata["x_coords"]
+            da.coords["y"] = metadata["y_coords"]
 
         return da
 
-    @matplotlib.rc_context(utils.fractional_plot_bundle(1))
-    def plot_error_map(
-        errors: Union[np.ndarray, torch.Tensor],
-        datastore: BaseRegularGridDatastore,
-        title: Optional[str] = None,
-    ) -> plt.Figure:
-        """Plot a heatmap of errors of different variables at different
-        prediction horizons.
 
-        Parameters
-        ----------
-        errors : Union[np.ndarray, torch.Tensor]
-            Array of errors to plot
-        datastore : BaseRegularGridDatastore
-            Datastore containing the data
-        title : str, optional
-            Title for the plot
+@matplotlib.rc_context(utils.fractional_plot_bundle(1))
+def plot_error_map(
+    errors: Union[np.ndarray, torch.Tensor],
+    datastore: BaseRegularGridDatastore,
+    title: Optional[str] = None,
+) -> plt.Figure:
+    """Plot a heatmap of errors of different variables at different
+    prediction horizons.
 
-        Returns
-        -------
-        plt.Figure
-            The resulting figure
+    Parameters
+    ----------
+    errors : Union[np.ndarray, torch.Tensor]
+        Array of errors to plot
+    datastore : BaseRegularGridDatastore
+        Datastore containing the data
+    title : str, optional
+        Title for the plot
 
-        Raises
-        ------
-        TypeError
-            If errors is not a numpy array or torch tensor
-        """
-        if not isinstance(errors, (np.ndarray, torch.Tensor)):
-            raise TypeError("errors must be numpy array or torch tensor")
+    Returns
+    -------
+    plt.Figure
+        The resulting figure
 
-        errors_np = errors.T.cpu().numpy()  # (d_f, pred_steps)
-        d_f, pred_steps = errors_np.shape
-        step_length = datastore.step_length
+    Raises
+    ------
+    TypeError
+        If errors is not a numpy array or torch tensor
+    """
+    if not isinstance(errors, (np.ndarray, torch.Tensor)):
+        raise TypeError("errors must be numpy array or torch tensor")
 
-        # Normalize all errors to [0,1] for color map
-        max_errors = errors_np.max(axis=1)  # d_f
-        errors_norm = errors_np / np.expand_dims(max_errors, axis=1)
+    errors_np = errors.T.cpu().numpy()  # (d_f, pred_steps)
+    d_f, pred_steps = errors_np.shape
+    step_length = datastore.step_length
 
-        fig, ax = plt.subplots(figsize=(15, 10))
+    # Normalize all errors to [0,1] for color map
+    max_errors = errors_np.max(axis=1)  # d_f
+    errors_norm = errors_np / np.expand_dims(max_errors, axis=1)
 
-        ax.imshow(
-            errors_norm,
-            cmap="OrRd",
-            vmin=0,
-            vmax=1.0,
-            interpolation="none",
-            aspect="auto",
-            alpha=0.8,
-        )
+    fig, ax = plt.subplots(figsize=(15, 10))
 
-        # ax and labels
-        for (j, i), error in np.ndenumerate(errors_np):
-            # Numbers > 9999 will be too large to fit
-            formatted_error = f"{error:.3f}" if error < 9999 else f"{error:.2E}"
-            ax.text(
-                i, j, formatted_error, ha="center", va="center", usetex=False
-            )
+    ax.imshow(
+        errors_norm,
+        cmap="OrRd",
+        vmin=0,
+        vmax=1.0,
+        interpolation="none",
+        aspect="auto",
+        alpha=0.8,
+    )
 
-        # Ticks and labels
-        label_size = 15
-        ax.set_xticks(np.arange(pred_steps))
-        pred_hor_i = np.arange(pred_steps) + 1  # Prediction horiz. in index
-        pred_hor_h = step_length * pred_hor_i  # Prediction horiz. in hours
-        ax.set_xticklabels(pred_hor_h, size=label_size)
-        ax.set_xlabel("Lead time (h)", size=label_size)
+    # ax and labels
+    for (j, i), error in np.ndenumerate(errors_np):
+        # Numbers > 9999 will be too large to fit
+        formatted_error = f"{error:.3f}" if error < 9999 else f"{error:.2E}"
+        ax.text(i, j, formatted_error, ha="center", va="center", usetex=False)
 
-        ax.set_yticks(np.arange(d_f))
-        var_names = datastore.get_vars_names(category="state")
-        var_units = datastore.get_vars_units(category="state")
-        y_ticklabels = [
-            f"{name} ({unit})" for name, unit in zip(var_names, var_units)
-        ]
-        ax.set_yticklabels(y_ticklabels, rotation=30, size=label_size)
+    # Ticks and labels
+    label_size = 15
+    ax.set_xticks(np.arange(pred_steps))
+    pred_hor_i = np.arange(pred_steps) + 1  # Prediction horiz. in index
+    pred_hor_h = step_length * pred_hor_i  # Prediction horiz. in hours
+    ax.set_xticklabels(pred_hor_h, size=label_size)
+    ax.set_xlabel("Lead time (h)", size=label_size)
 
-        if title:
-            ax.set_title(title, size=15)
+    ax.set_yticks(np.arange(d_f))
+    var_names = datastore.get_vars_names(category="state")
+    var_units = datastore.get_vars_units(category="state")
+    y_ticklabels = [
+        f"{name} ({unit})" for name, unit in zip(var_names, var_units)
+    ]
+    ax.set_yticklabels(y_ticklabels, rotation=30, size=label_size)
 
-        return fig
+    if title:
+        ax.set_title(title, size=15)
+
+    return fig
 
 
 def find_closest_boundary_time(

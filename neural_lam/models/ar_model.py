@@ -1,6 +1,6 @@
 # Standard library
 import os
-from typing import List, Union
+from typing import Union
 
 # Third-party
 import matplotlib.pyplot as plt
@@ -8,7 +8,6 @@ import numpy as np
 import pytorch_lightning as pl
 import torch
 import wandb
-import xarray as xr
 
 # Local
 from .. import metrics, vis
@@ -213,31 +212,11 @@ class ARModel(pl.LightningModule):
             else {}
         )
 
-        # Create visualizer instance
-        self.visualizer = vis.Visualizer(
+        # Create plot data manager instance (renamed from visualizer)
+        self.plot_manager = vis.PlotDataManager(
             interior_datastore=self._datastore,
             boundary_datastore=self._datastore_boundary,
             boundary_var_map=self.boundary_var_map,
-        )
-
-    def _create_dataarray_from_tensor(
-        self,
-        tensor: torch.Tensor,
-        time: Union[int, List[int]],
-        split: str,
-        category: str,
-    ) -> xr.DataArray:
-        """Convert tensor to DataArray for plotting"""
-        is_boundary = (
-            self.boundary_forced
-            and category == "forcing"
-            and self._datastore_boundary is not None
-        )
-        return self.visualizer.tensor_to_dataarray(
-            tensor=tensor,
-            times=time,
-            category=category,
-            is_boundary=is_boundary,
         )
 
     def configure_optimizers(self):
@@ -547,17 +526,18 @@ class ARModel(pl.LightningModule):
             # Each slice is (pred_steps, num_interior_nodes, d_f)
             self.plotted_examples += 1  # Increment already here
 
-            da_prediction = self._create_dataarray_from_tensor(
+            da_prediction = self.plot_manager.tensor_to_dataarray(
                 tensor=pred_slice,
-                time=time_slice,
-                split=split,
+                times=time_slice,
                 category="state",
+                is_boundary=False,
             ).unstack("grid_index")
-            da_target = self._create_dataarray_from_tensor(
+
+            da_target = self.plot_manager.tensor_to_dataarray(
                 tensor=target_slice,
-                time=time_slice,
-                split=split,
+                times=time_slice,
                 category="state",
+                is_boundary=False,
             ).unstack("grid_index")
 
             if boundary_slice is not None and self.boundary_forced:
@@ -571,27 +551,22 @@ class ARModel(pl.LightningModule):
                 )
                 num_features = boundary_slice.shape[-1] // window_size
 
-                # Reshape into (pred_steps, num_boundary_nodes, window_size,
-                # num_features)
-                boundary_slice_reshaped = boundary_slice.view(
-                    boundary_slice.shape[0],  # pred_steps
-                    self.num_boundary_nodes,
-                    window_size,
-                    num_features,
-                )
-                # Move window dimension first while preserving order of other
-                # dimensions: (pred_steps, num_boundary_nodes, window_size,
-                # num_features) -> (window_size, pred_steps, num_boundary_nodes,
-                # num_features)
-                boundary_slice_reshaped = boundary_slice_reshaped.permute(
-                    2, 0, 1, 3
-                )
+                # Only select the "non-windowed" entry for each feature
+                boundary_slice_no_window = boundary_slice[
+                    :,
+                    :,
+                    self.num_past_boundary_steps : num_features
+                    * window_size : window_size,
+                ]
 
-                da_boundary_forcing = self._create_dataarray_from_tensor(
-                    tensor=boundary_slice_reshaped,
-                    time=time_slice,
-                    split=split,
+                print("DEBUG: Plotting boundary forcing")
+                print(f"Boundary forcing: {boundary_slice_no_window.shape}")
+
+                da_boundary_forcing = self.plot_manager.tensor_to_dataarray(
+                    tensor=boundary_slice_no_window,
+                    times=time_slice,
                     category="forcing",
+                    is_boundary=True,
                 )
 
             var_vmin = (

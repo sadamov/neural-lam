@@ -328,8 +328,8 @@ def get_stacked_lat_lons(datastore, datastore_boundary=None):
         return grid_coords
 
     # Append boundary forcing positions last
-    boundary_coords = datastore_boundary.get_lat_lon(category="forcing")
-    return np.concatenate((grid_coords, boundary_coords), axis=0)
+    coords_boundary = datastore_boundary.get_lat_lon(category="forcing")
+    return np.concatenate((grid_coords, coords_boundary), axis=0)
 
 
 def get_stacked_xy(datastore, datastore_boundary=None):
