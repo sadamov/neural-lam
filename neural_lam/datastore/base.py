@@ -258,7 +258,8 @@ class BaseDatastore(abc.ABC):
     def get_xy(self, category: str) -> np.ndarray:
         """
         Return the x, y coordinates of the dataset as a numpy arrays for a
-        given category of data.
+        given category of data. Falls back to transforming lat/lon coordinates
+        if native x/y coordinates are not available.
 
         Parameters
         ----------
@@ -270,7 +271,11 @@ class BaseDatastore(abc.ABC):
         np.ndarray
             The x, y coordinates of the dataset with shape `[n_grid_points, 2]`.
         """
-        pass
+        latlon = self.get_lat_lon(category=category)
+        transformed_points = self.coords_projection.transform_points(
+            ccrs.PlateCarree(), latlon[:, 0], latlon[:, 1]
+        )
+        return transformed_points[:, :2]  # Remove z-dim
 
     @property
     @abc.abstractmethod
@@ -312,7 +317,9 @@ class BaseDatastore(abc.ABC):
         return transformed_points[:, :2]  # Remove z-dim
 
     @functools.lru_cache
-    def get_xy_extent(self, category: str) -> List[float]:
+    def get_xy_extent(
+        self, category: str, use_latlon: bool = False
+    ) -> List[float]:
         """
         Return the extent of the x, y coordinates for a given category of data.
         The extent should be returned as a list of 4 floats with `[xmin, xmax,
@@ -322,6 +329,8 @@ class BaseDatastore(abc.ABC):
         ----------
         category : str
             The category of the dataset (state/forcing/static).
+        use_latlon : bool
+            If True, use lat/lon coordinates instead of x/y.
 
         Returns
         -------
@@ -433,7 +442,10 @@ class BaseDatastore(abc.ABC):
                 # static data does not vary in time
                 if self.is_forecast:
                     dim_order.extend(
-                        ["analysis_time", "elapsed_forecast_duration"]
+                        [
+                            "analysis_time",
+                            "elapsed_forecast_duration",
+                        ]
                     )
                 elif not self.is_forecast:
                     dim_order.append("time")
@@ -616,19 +628,28 @@ class BaseRegularGridDatastore(BaseDatastore):
         """
         return self.grid_shape_state.x * self.grid_shape_state.y
 
-    def get_xy_extent(self, category: str) -> List[float]:
-        """Get the extent of the grid in x/y coordinates.
-        
-        Falls back to lon/lat if x/y not available.
-        """
+
+def get_xy_extent(self, category: str, use_latlon: bool = True) -> List[float]:
+    """Get the extent of the grid in x/y coordinates or lat/lon if
+    specified/fallback.
+
+    Args:
+        category: The category of coordinates to get extents for use_latlon: If
+        True, use lat/lon coordinates instead of x/y
+
+    Returns:
+        List[float]: [min_x, max_x, min_y, max_y] coordinates
+    """
+    coords = None
+    if not use_latlon:
         try:
-            xy = self.get_xy(category, stacked=True)
-            x_min, y_min = xy.min(axis=0)
-            x_max, y_max = xy.max(axis=0)
+            coords = self.get_xy(category, stacked=True)
         except (AttributeError, ValueError):
-            # Fallback to lon/lat if x/y not available
-            ll = self.get_lat_lon(category)
-            x_min, y_min = ll.min(axis=0)
-            x_max, y_max = ll.max(axis=0)
-        
-        return [x_min, x_max, y_min, y_max]
+            print("Could not get x/y coordinates, falling back to lat/lon")
+            pass
+
+    if coords is None:
+        coords = self.get_lat_lon(category)
+
+    mins, maxs = coords.min(axis=0), coords.max(axis=0)
+    return [mins[0], maxs[0], mins[1], maxs[1]]

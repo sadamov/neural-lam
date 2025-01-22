@@ -632,8 +632,31 @@ class NpyFilesDatastoreMEPS(BaseRegularGridDatastore):
     def get_num_data_vars(self, category: str) -> int:
         return len(self.get_vars_names(category=category))
 
-    def get_xy(self, category: str, stacked: bool = True) -> np.ndarray:
-        """Return the x, y coordinates of the dataset.
+    def get_lat_lon(self, category: str) -> np.ndarray:
+        """
+        Return the longitude, latitude coordinates of the dataset as numpy
+        array for a given category of data.
+
+        Parameters
+        ----------
+        category : str
+            The category of the dataset (state/forcing/static).
+
+        Returns
+        -------
+        np.ndarray
+            The longitude, latitude coordinates of the dataset
+            with shape `[n_grid_points, 2]`.
+        """
+        # Here we need to transform from xy to latlon since the data is stored in xy
+        xy = self.get_xy_native(category=category)
+        transformed_points = ccrs.PlateCarree().transform_points(
+            self.coords_projection, xy[:, 0], xy[:, 1]
+        )
+        return transformed_points[:, :2]  # Remove z-dim
+
+    def get_xy_native(self, category: str, stacked: bool = True) -> np.ndarray:
+        """Return the native x, y coordinates of the dataset.
 
         Parameters
         ----------
@@ -652,7 +675,6 @@ class NpyFilesDatastoreMEPS(BaseRegularGridDatastore):
             - `stacked==False`: shape `(N_x, N_y, 2)`
 
         """
-
         # the array on disk has shape [2, N_y, N_x], where dimension 0
         # contains the [x,y] coordinate pairs for each grid point
         arr = np.load(self.root_path / "static" / "nwp_xy.npy")
@@ -668,6 +690,28 @@ class NpyFilesDatastoreMEPS(BaseRegularGridDatastore):
             return arr.reshape(-1, 2)
         else:
             return arr
+
+    def get_xy(self, category: str, stacked: bool = True) -> np.ndarray:
+        """Return the x, y coordinates of the dataset.
+        Default implementation that falls back to the base class method which
+        derives xy from lat/lon if native xy coordinates are not available.
+
+        Parameters
+        ----------
+        category : str
+            The category of the dataset (state/forcing/static).
+        stacked : bool
+            Whether to stack the x, y coordinates.
+
+        Returns
+        -------
+        np.ndarray
+            The x, y coordinates of the dataset
+        """
+        try:
+            return self.get_xy_native(category, stacked)
+        except (AttributeError, ValueError):
+            return super().get_xy(category)
 
     @property
     def step_length(self) -> int:

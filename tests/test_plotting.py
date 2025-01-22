@@ -71,7 +71,9 @@ def test_plot_data_manager(config_and_datastores):
 
     # Invalid boundary var map type
     with pytest.raises(TypeError):
-        PlotDataManager(interior_datastore=datastore, boundary_var_map="invalid")
+        PlotDataManager(
+            interior_datastore=datastore, boundary_var_map="invalid"
+        )
 
 
 def test_visualizer_initialization(config_and_datastores):
@@ -101,7 +103,9 @@ def test_visualizer_tensor_conversion(plot_manager):
 
     # Test 2D tensor - needs expansion to match expected 3D format
     tensor_2d = torch.randn(grid_points, n_features)
-    tensor = tensor_2d.unsqueeze(0)  # Add time dimension: (1, grid_points, n_features)
+    tensor = tensor_2d.unsqueeze(
+        0
+    )  # Add time dimension: (1, grid_points, n_features)
     times = torch.tensor([np.datetime64("2023-01-01").astype(np.int64)])
 
     # Valid conversion
@@ -113,10 +117,12 @@ def test_visualizer_tensor_conversion(plot_manager):
 
     # Test 3D tensor with multiple timesteps
     tensor_3d = torch.randn(2, grid_points, n_features)  # (time, grid, feature)
-    times_3d = torch.tensor([
-        np.datetime64("2023-01-01").astype(np.int64),
-        np.datetime64("2023-01-02").astype(np.int64),
-    ])
+    times_3d = torch.tensor(
+        [
+            np.datetime64("2023-01-01").astype(np.int64),
+            np.datetime64("2023-01-02").astype(np.int64),
+        ]
+    )
     da_3d = plot_manager.tensor_to_dataarray(tensor_3d, times_3d, "state")
     assert isinstance(da_3d, xr.DataArray)
     assert "time" in da_3d.dims
@@ -131,7 +137,7 @@ def test_visualizer_tensor_conversion(plot_manager):
     # Invalid tensor type
     with pytest.raises(TypeError):
         plot_manager.tensor_to_dataarray(
-            np.zeros((1, grid_points, n_features)), times, "state" 
+            np.zeros((1, grid_points, n_features)), times, "state"
         )
 
 

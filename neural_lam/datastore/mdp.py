@@ -100,9 +100,9 @@ class MDPDatastore(BaseRegularGridDatastore):
             if dim_order is None:
                 dim_order = dim_order_
             else:
-                assert (
-                    dim_order == dim_order_
-                ), "all inputs must have the same dimension order"
+                assert dim_order == dim_order_, (
+                    "all inputs must have the same dimension order"
+                )
 
         self.CARTESIAN_COORDS = dim_order
 
@@ -307,9 +307,9 @@ class MDPDatastore(BaseRegularGridDatastore):
             f"{category}__{split}__{op}": f"{category}_{op}" for op in ops
         }
         if category == "state":
-            stats_variables.update(
-                {f"state__{split}__diff_{op}": f"state_diff_{op}" for op in ops}
-            )
+            stats_variables.update({
+                f"state__{split}__diff_{op}": f"state_diff_{op}" for op in ops
+            })
 
         ds_stats = self._ds[stats_variables.keys()].rename(stats_variables)
         if "grid_index" in ds_stats.coords:
@@ -394,58 +394,129 @@ class MDPDatastore(BaseRegularGridDatastore):
         assert da_x.ndim == da_y.ndim == 1
         return CartesianGridShape(x=da_x.size, y=da_y.size)
 
+    def get_lat_lon(self, category: str) -> np.ndarray:
+        """Return the latitude/longitude coordinates of the dataset.
+
+        Parameters
+        ----------
+        category : str
+            The category of the dataset (state/forcing/static).
+
+        Returns
+        -------
+        np.ndarray
+            The lon/lat coordinates with shape (n_grid_points, 2)
+        """
+        if category not in self._ds:
+            warnings.warn(f"no {category} data found in datastore")
+            # Fall back to another category that exists
+            for cat in ["state", "forcing", "static"]:
+                if cat in self._ds:
+                    category = cat
+                    break
+            if category not in self._ds:
+                raise ValueError("No valid category found in dataset")
+
+        # Get the lat/lon coordinates - try different possible coordinate names
+        if "longitude" in self._ds.coords and "latitude" in self._ds.coords:
+            lon = self._ds.longitude
+            lat = self._ds.latitude
+        elif "lon" in self._ds.coords and "lat" in self._ds.coords:
+            lon = self._ds.lon
+            lat = self._ds.lat
+        else:
+            raise ValueError("No lat/lon coordinates found in dataset")
+
+        # Stack coordinates into single array
+        coords = np.stack((lon.values.flatten(), lat.values.flatten()), axis=1)
+        return coords
+
     def get_xy(self, category: str, stacked: bool = True) -> np.ndarray:
-        """Return the x, y coordinates of the dataset.
+        """Return the x/y coordinates of the dataset, derived from lat/lon.
 
         Parameters
         ----------
         category : str
             The category of the dataset (state/forcing/static).
         stacked : bool
-            Whether to stack the x, y coordinates.
+            Whether to stack the coordinates.
 
         Returns
         -------
         np.ndarray
-            The x, y coordinates of the dataset, returned differently based on
-            the value of `stacked`:
-            - `stacked==True`: shape `(n_grid_points, 2)` where
-                               n_grid_points=N_x*N_y.
-            - `stacked==False`: shape `(N_x, N_y, 2)`
-
+            The x/y coordinates
         """
-        # assume variables are stored in dimensions [grid_index, ...]
-        ds_category = self.unstack_grid_coords(da_or_ds=self._ds[category])
+        # Get lat/lon and transform to x/y using projection
+        latlon = self.get_lat_lon(category)
+        transformed = self.coords_projection.transform_points(
+            ccrs.PlateCarree(), latlon[:, 0], latlon[:, 1]
+        )
+        xy = transformed[:, :2]  # Drop z coordinate
 
-        da_xs = ds_category.x
-        da_ys = ds_category.y
+        if not stacked:
+            # Reshape to grid
+            shape = self.grid_shape_state
+            xy = xy.reshape(shape.x, shape.y, 2)
 
-        assert da_xs.ndim == da_ys.ndim == 1, "x and y coordinates must be 1D"
+        return xy
 
-        da_x, da_y = xr.broadcast(da_xs, da_ys)
-        da_xy = xr.concat([da_x, da_y], dim="grid_coord")
+    def get_xy_extent(self, category: str, use_latlon: bool = True) -> tuple:
+        """Return the extent of the dataset in lat/lon or native coordinates.
 
-        if stacked:
-            da_xy = da_xy.stack(grid_index=self.CARTESIAN_COORDS).transpose(
-                "grid_index",
-                "grid_coord",
+        Parameters
+        ----------
+        category : str
+            The category of the dataset (state/forcing/static).
+        use_latlon : bool
+            If True, return extent in lat/lon coordinates, otherwise in native coords.
+
+        Returns
+        -------
+        tuple
+            The extent as (min_x, max_x, min_y, max_y)
+        """
+        if use_latlon:
+            # Get lat/lon coordinates
+            latlon = self.get_lat_lon(category)
+            lons, lats = latlon[:, 0], latlon[:, 1]
+
+            # Handle 360-degree longitude wrapping
+            lon_min, lon_max = lons.min(), lons.max()
+            if lon_max - lon_min > 350:  # Close to 360 degrees
+                # Find the actual longitude range needed
+                min_east = (
+                    lons[lons > 180].min() - 360 if any(lons > 180) else None
+                )
+                max_west = lons[lons < 180].max() if any(lons < 180) else None
+
+                # If we have both east and west coordinates, select the appropriate range
+                if min_east is not None and max_west is not None:
+                    # Choose range that minimizes the width
+                    if max_west - min_east < lon_max - lon_min:
+                        lon_min, lon_max = min_east, max_west
+                # Otherwise use whichever range we have
+                elif min_east is not None:
+                    lon_min = min_east
+                    lon_max = lons[lons <= 180].max()
+                elif max_west is not None:
+                    lon_min = lons[lons >= -180].min()
+                    lon_max = max_west
+
+            return (
+                float(lon_min),
+                float(lon_max),
+                float(lats.min()),
+                float(lats.max()),
             )
-        else:
-            dims = [
-                "x",
-                "y",
-                "grid_coord",
-            ]
-            da_xy = da_xy.transpose(*dims)
 
-        return da_xy.values
+        # ...existing code for non-latlon case...
 
     @functools.lru_cache
     def get_lat_lon(self, category: str) -> np.ndarray:
         """
         Return the longitude, latitude coordinates of the dataset as numpy
-        array for a given category of data.
-        Override in MDP to use lat/lons directly from xr.Dataset, if available.
+        array for a given category of data. Uses lat/lon directly from dataset
+        if available.
 
         Parameters
         ----------
@@ -467,8 +538,7 @@ class MDPDatastore(BaseRegularGridDatastore):
             lon = lookup_ds.lon
             lat = lookup_ds.lat
         else:
-            # Not saved, use method from BaseDatastore to derive from x/y
-            return super().get_lat_lon(category)
+            raise ValueError("No lat/lon coordinates found in dataset")
 
         coords = np.stack((lon.values, lat.values), axis=1)
         return coords

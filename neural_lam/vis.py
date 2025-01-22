@@ -2,6 +2,8 @@
 from typing import Any, Dict, Optional, Tuple, Union
 
 # Third-party
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
@@ -300,72 +302,124 @@ def plot_on_axis(
     vmax: Optional[float] = None,
     cmap: str = "plasma",
 ) -> plt.Artist:
-    """Plot weather state on given axis with optional boundary data.
-
-    Parameters
-    ----------
-    ax : plt.Axes
-        Matplotlib axis to plot on
-    da : xr.DataArray
-        DataArray to plot
-    datastore : BaseRegularGridDatastore
-        Datastore containing the data
-    boundary_da : xr.DataArray, optional
-        Boundary data to plot
-    boundary_datastore : BaseRegularGridDatastore, optional
-        Datastore containing boundary data
-    vmin : float, optional
-        Minimum value for color scale
-    vmax : float, optional
-        Maximum value for color scale
-    cmap : str, optional
-        Colormap to use
-
-    Returns
-    -------
-    plt.Artist
-        The plotted image artist
-    """
+    """Plot weather state on given axis with optional boundary data."""
     if not isinstance(ax, plt.Axes):
         raise TypeError("ax must be a matplotlib Axes object")
 
     if boundary_da is not None and boundary_datastore is None:
         raise ValueError("boundary_datastore required for boundary plotting")
 
-    # Plot interior data
-    extent = datastore.get_xy_extent("state")
-    im = da.plot.imshow(
-        ax=ax,
-        origin="lower",
-        x="x" if "x" in da.coords else None,  # Make x coordinate optional
-        extent=extent,
-        vmin=vmin,
-        vmax=vmax,
-        cmap=cmap,
-        transform=datastore.coords_projection,
-        zorder=2,  # Ensure interior is plotted on top
-    )
+    # Always use PlateCarree for input data (assuming lat/lon coordinates)
+    data_proj = ccrs.PlateCarree()
 
-    # Plot boundary data if provided
+    # First set up the map features
+    ax.coastlines(resolution="50m")
+    ax.add_feature(cfeature.BORDERS, linestyle="-", alpha=0.5)
+    gl = ax.gridlines(
+        draw_labels=True,
+        dms=True,
+        x_inline=False,
+        y_inline=False,
+        transform=data_proj,
+    )
+    gl.top_labels = False
+    gl.right_labels = False
+
+    # Get map extent in lat/lon coordinates
+    if boundary_datastore is not None:
+        extent = boundary_datastore.get_xy_extent("forcing", use_latlon=True)
+    else:
+        extent = datastore.get_xy_extent("state", use_latlon=True)
+
+    # Add padding to lat/lon extent
+    padding = 1.0  # degrees
+    plot_extent = [
+        extent[0] - padding,  # lon min
+        extent[1] + padding,  # lon max
+        extent[2] - padding,  # lat min
+        extent[3] + padding,  # lat max
+    ]
+
+    # Set extent in lat/lon coordinates
+    ax.set_extent(plot_extent, crs=data_proj)
+
+    def get_coords_from_dataarray(
+        da: xr.DataArray,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Helper to extract lat/lon or x/y coordinates from a DataArray"""
+        # Try different possible coordinate names
+        if hasattr(da, "longitude") and hasattr(da, "latitude"):
+            x = da.longitude.values
+            y = da.latitude.values
+        elif hasattr(da, "lon") and hasattr(da, "lat"):
+            x = da.lon.values
+            y = da.lat.values
+        elif hasattr(da, "x") and hasattr(da, "y"):
+            # Use Cartesian coordinates directly
+            x = da.x.values
+            y = da.y.values
+        else:
+            # Fallback to getting coordinates from datastore
+            coords = datastore.get_lat_lon("state")
+            x = coords[:, 0].reshape(da.shape)
+            y = coords[:, 1].reshape(da.shape)
+
+        return x, y
+
+    # Handle boundary data first
     if boundary_da is not None and boundary_datastore is not None:
         try:
-            boundary_extent = boundary_datastore.get_xy_extent("forcing")
-            boundary_da.plot.imshow(
-                ax=ax,
-                origin="lower",
-                x="x" if "x" in boundary_da.coords else None,
-                extent=boundary_extent,
+            x, y = get_coords_from_dataarray(boundary_da)
+            if len(x.shape) == 1:
+                X, Y = np.meshgrid(x, y)
+            else:
+                X, Y = x, y
+            print("min", X.min().values)
+            print("max", X.max().values)
+
+            im_boundary = ax.pcolormesh(
+                X,
+                Y,
+                boundary_da.values.T,
+                transform=data_proj,  # Data is in lat/lon coordinates
                 vmin=vmin,
                 vmax=vmax,
                 cmap=cmap,
-                transform=boundary_datastore.coords_projection,
-                alpha=0.5,  # Make boundary slightly transparent
-                zorder=1,  # Ensure boundary is plotted below interior
+                alpha=0.5,
+                zorder=1,
+                shading="nearest",
             )
-        except AttributeError as e:
-            print(f"Warning: Could not plot boundary data: {e}")
+        except Exception as e:
+            print(f"Warning: Failed to plot boundary data: {e}")
 
-    ax.coastlines()  # Add coastline outlines
+    try:
+        x, y = get_coords_from_dataarray(da)
+        if len(x.shape) == 1:
+            X, Y = np.meshgrid(x, y)
+        else:
+            X, Y = x, y
+            print("min", X.min().values)
+            print("max", X.max().values)
+        im = ax.pcolormesh(
+            X,
+            Y,
+            da.values.T,
+            transform=data_proj,  # Data is in lat/lon coordinates
+            vmin=vmin,
+            vmax=vmax,
+            cmap=cmap,
+            zorder=2,
+            shading="nearest",
+        )
+    except Exception as e:
+        print(f"Warning: Failed to plot interior data: {e}")
+        raise
+
+    # Add map features after plotting data
+    ax.coastlines(resolution="50m")
+    ax.add_feature(cfeature.BORDERS, linestyle="-", alpha=0.5)
+    ax.gridlines(draw_labels=True, transform=data_proj)
+
     return im
 
 
@@ -422,6 +476,24 @@ def plot_prediction(
     if not hasattr(datastore, "coords_projection"):
         raise ValueError("datastore must have coords_projection")
 
+    # Calculate figure size based on the larger extent
+    extent = datastore.get_xy_extent("state")
+    plot_width = extent[1] - extent[0]
+    plot_height = extent[3] - extent[2]
+
+    if boundary_datastore is not None:
+        boundary_extent = boundary_datastore.get_xy_extent("forcing")
+        plot_width = max(plot_width, boundary_extent[1] - boundary_extent[0])
+        plot_height = max(plot_height, boundary_extent[3] - boundary_extent[2])
+
+    # Adjust figure size while maintaining aspect ratio
+    aspect_ratio = plot_width / plot_height
+    base_width = 15
+    fig_width = base_width
+    fig_height = base_width / (
+        2 * aspect_ratio
+    )  # divide by 2 because we have two subplots
+
     # Get common scale for values
     if vrange is None:
         vmin = min(da_prediction.min(), da_target.min())
@@ -439,12 +511,13 @@ def plot_prediction(
     else:
         vmin, vmax = vrange
 
-    fig, axes = plt.subplots(
-        1,
-        2,
-        figsize=(13, 7),
-        subplot_kw={"projection": datastore.coords_projection},
-    )
+    # Create figure with the correct projection set from the start
+    fig = plt.figure(figsize=(fig_width, fig_height))
+    gs = fig.add_gridspec(1, 2)
+    axes = [
+        fig.add_subplot(gs[0, i], projection=datastore.coords_projection)
+        for i in range(2)
+    ]
 
     # Only process boundary data if we have all required components
     boundary_da_to_plot = None
@@ -529,12 +602,10 @@ def plot_spatial_error(
     )
 
     error_grid = (
-        error.reshape(
-            [
-                datastore.grid_shape_state.x,
-                datastore.grid_shape_state.y,
-            ]
-        )
+        error.reshape([
+            datastore.grid_shape_state.x,
+            datastore.grid_shape_state.y,
+        ])
         .T.cpu()
         .numpy()
     )
