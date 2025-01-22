@@ -349,33 +349,39 @@ def plot_on_axis(
         """Helper to extract lat/lon or x/y coordinates from a DataArray"""
         # Try different possible coordinate names
         if hasattr(da, "longitude") and hasattr(da, "latitude"):
+            print("using latitude/longitude")
             x = da.longitude.values
             y = da.latitude.values
+            if x.max() > 180:
+                x = np.where(x > 180, x - 360, x)
         elif hasattr(da, "lon") and hasattr(da, "lat"):
+            print("using lon/lat")
             x = da.lon.values
             y = da.lat.values
-        elif hasattr(da, "x") and hasattr(da, "y"):
-            # Use Cartesian coordinates directly
-            x = da.x.values
-            y = da.y.values
         else:
+            print("using datastore")
             # Fallback to getting coordinates from datastore
             coords = datastore.get_lat_lon("state")
-            x = coords[:, 0].reshape(da.shape)
-            y = coords[:, 1].reshape(da.shape)
+            x = coords[:, 0].reshape(da.T.shape)
+            y = coords[:, 1].reshape(da.T.shape)
 
         return x, y
 
     # Handle boundary data first
     if boundary_da is not None and boundary_datastore is not None:
         try:
+            "Working with Boundary Data"
             x, y = get_coords_from_dataarray(boundary_da)
             if len(x.shape) == 1:
                 X, Y = np.meshgrid(x, y)
             else:
                 X, Y = x, y
-            print("min", X.min().values)
-            print("max", X.max().values)
+            print("BminX", X.min())
+            print("BmaxX", X.max())
+            print("BminY", Y.min())
+            print("BmaxY", Y.max())
+            print("BshapeX", X.shape)
+            print("BshapeY", Y.shape)
 
             im_boundary = ax.pcolormesh(
                 X,
@@ -393,13 +399,18 @@ def plot_on_axis(
             print(f"Warning: Failed to plot boundary data: {e}")
 
     try:
+        "Working with Interior Data"
         x, y = get_coords_from_dataarray(da)
         if len(x.shape) == 1:
             X, Y = np.meshgrid(x, y)
         else:
             X, Y = x, y
-            print("min", X.min().values)
-            print("max", X.max().values)
+            print("minX", X.min())
+            print("maxX", X.max())
+            print("minY", Y.min())
+            print("maxY", Y.max())
+            print("shapeX", X.shape)
+            print("shapeY", Y.shape)
         im = ax.pcolormesh(
             X,
             Y,
@@ -598,7 +609,7 @@ def plot_spatial_error(
 
     fig, ax = plt.subplots(
         figsize=(5, 4.8),
-        subplot_kw={"projection": datastore.coords_projection},
+        subplot_kw={"projection": ccrs.PlateCarree()},
     )
 
     error_grid = (
