@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import torch
 import xarray as xr
+from matplotlib.artist import Artist
 
 # Local
 from . import utils
@@ -328,20 +329,13 @@ def plot_on_axis(
     # Get map extent in lat/lon coordinates
     if boundary_datastore is not None:
         extent = boundary_datastore.get_xy_extent("forcing", use_latlon=True)
+        print("extent", extent)
     else:
+        print("using state")
         extent = datastore.get_xy_extent("state", use_latlon=True)
 
-    # Add padding to lat/lon extent
-    padding = 1.0  # degrees
-    plot_extent = [
-        extent[0] - padding,  # lon min
-        extent[1] + padding,  # lon max
-        extent[2] - padding,  # lat min
-        extent[3] + padding,  # lat max
-    ]
-
     # Set extent in lat/lon coordinates
-    ax.set_extent(plot_extent, crs=data_proj)
+    ax.set_extent(extent, crs=data_proj)
 
     def get_coords_from_dataarray(
         da: xr.DataArray,
@@ -352,8 +346,6 @@ def plot_on_axis(
             print("using latitude/longitude")
             x = da.longitude.values
             y = da.latitude.values
-            if x.max() > 180:
-                x = np.where(x > 180, x - 360, x)
         elif hasattr(da, "lon") and hasattr(da, "lat"):
             print("using lon/lat")
             x = da.lon.values
@@ -362,37 +354,43 @@ def plot_on_axis(
             print("using datastore")
             # Fallback to getting coordinates from datastore
             coords = datastore.get_lat_lon("state")
-            x = coords[:, 0].reshape(da.T.shape)
-            y = coords[:, 1].reshape(da.T.shape)
+            x = coords[:, 0].reshape(da.shape)
+            y = coords[:, 1].reshape(da.shape)
+        if x.max() > 180:
+            x = np.where(x > 180, x - 360, x)
+        if y.max() > 90:
+            y = np.where(y > 90, y - 180, y)
 
         return x, y
+
+    im_boundary = None
 
     # Handle boundary data first
     if boundary_da is not None and boundary_datastore is not None:
         try:
             "Working with Boundary Data"
-            x, y = get_coords_from_dataarray(boundary_da)
-            if len(x.shape) == 1:
-                X, Y = np.meshgrid(x, y)
+            x_boundary, y_boundary = get_coords_from_dataarray(boundary_da)
+            if len(x_boundary.shape) == 1:
+                print("reshaping")
+                Y_boundary, X_boundary = np.meshgrid(y_boundary, x_boundary)
             else:
-                X, Y = x, y
-            print("BminX", X.min())
-            print("BmaxX", X.max())
-            print("BminY", Y.min())
-            print("BmaxY", Y.max())
-            print("BshapeX", X.shape)
-            print("BshapeY", Y.shape)
+                X_boundary, Y_boundary = x_boundary, y_boundary
+            print("BminX", X_boundary.min())
+            print("BmaxX", X_boundary.max())
+            print("BminY", Y_boundary.min())
+            print("BmaxY", Y_boundary.max())
+            print("BshapeX", X_boundary.shape)
+            print("BshapeY", Y_boundary.shape)
 
             im_boundary = ax.pcolormesh(
-                X,
-                Y,
-                boundary_da.values.T,
-                transform=data_proj,  # Data is in lat/lon coordinates
+                X_boundary,
+                Y_boundary,
+                boundary_da.values,
+                transform=data_proj,
                 vmin=vmin,
                 vmax=vmax,
                 cmap=cmap,
                 alpha=0.5,
-                zorder=1,
                 shading="nearest",
             )
         except Exception as e:
@@ -402,7 +400,7 @@ def plot_on_axis(
         "Working with Interior Data"
         x, y = get_coords_from_dataarray(da)
         if len(x.shape) == 1:
-            X, Y = np.meshgrid(x, y)
+            X, Y = np.meshgrid(y, x)
         else:
             X, Y = x, y
             print("minX", X.min())
@@ -414,12 +412,11 @@ def plot_on_axis(
         im = ax.pcolormesh(
             X,
             Y,
-            da.values.T,
+            da.values,
             transform=data_proj,  # Data is in lat/lon coordinates
             vmin=vmin,
             vmax=vmax,
             cmap=cmap,
-            zorder=2,
             shading="nearest",
         )
     except Exception as e:
@@ -431,7 +428,7 @@ def plot_on_axis(
     ax.add_feature(cfeature.BORDERS, linestyle="-", alpha=0.5)
     ax.gridlines(draw_labels=True, transform=data_proj)
 
-    return im
+    return im, im_boundary
 
 
 @matplotlib.rc_context(utils.fractional_plot_bundle(1))
@@ -507,9 +504,14 @@ def plot_prediction(
 
     # Get common scale for values
     if vrange is None:
-        vmin = min(da_prediction.min(), da_target.min())
-        vmax = max(da_prediction.max(), da_target.max())
-        # Only include boundary in value range if we will plot it
+        vmin = float("inf")
+        vmax = float("-inf")
+
+        # Calculate vmin and vmax for interior data
+        vmin = min(vmin, da_prediction.min().item(), da_target.min().item())
+        vmax = max(vmax, da_prediction.max().item(), da_target.max().item())
+
+        # Calculate vmin and vmax for boundary data if available
         if (
             da_boundary is not None
             and boundary_var_map
@@ -517,10 +519,19 @@ def plot_prediction(
         ):
             state_var_name = datastore.get_vars_names("state")[state_var_idx]
             if state_var_name in boundary_var_map:
-                vmin = min(vmin, da_boundary.min())
-                vmax = max(vmax, da_boundary.max())
+                boundary_var_name = boundary_var_map[state_var_name]
+                boundary_var_idx = boundary_datastore.get_vars_names(
+                    "forcing"
+                ).index(boundary_var_name)
+                boundary_da_var = da_boundary.isel(
+                    forcing_feature=boundary_var_idx
+                )
+                vmin = min(vmin, boundary_da_var.min().item())
+                vmax = max(vmax, boundary_da_var.max().item())
     else:
         vmin, vmax = vrange
+    print("vmin", vmin)
+    print("vmax", vmax)
 
     # Create figure with the correct projection set from the start
     fig = plt.figure(figsize=(fig_width, fig_height))
@@ -616,7 +627,9 @@ def plot_spatial_error(
         error.reshape([
             datastore.grid_shape_state.x,
             datastore.grid_shape_state.y,
-        ]).T.cpu().numpy(),
+        ])
+        .T.cpu()
+        .numpy(),
         dims=("y", "x"),
     )
     # Use plot_on_axis
