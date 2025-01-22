@@ -611,28 +611,24 @@ def plot_spatial_error(
         figsize=(5, 4.8),
         subplot_kw={"projection": ccrs.PlateCarree()},
     )
-
-    error_grid = (
+    # Convert error to DataArray
+    error_da = xr.DataArray(
         error.reshape([
             datastore.grid_shape_state.x,
             datastore.grid_shape_state.y,
-        ])
-        .T.cpu()
-        .numpy()
+        ]).T.cpu().numpy(),
+        dims=("y", "x"),
     )
-    extent = datastore.get_xy_extent("state")
-
-    # TODO: This needs to be converted to DA and use plot_on_axis
-    im = ax.imshow(
-        error_grid,
-        origin="lower",
-        extent=extent,
+    # Use plot_on_axis
+    im = plot_on_axis(
+        ax=ax,
+        da=error_da,
+        datastore=datastore,
         vmin=vmin,
         vmax=vmax,
         cmap="OrRd",
     )
 
-    # Ticks and labels
     cbar = fig.colorbar(im, aspect=30)
     cbar.ax.tick_params(labelsize=10)
     cbar.ax.yaxis.get_offset_text().set_fontsize(10)
