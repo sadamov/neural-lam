@@ -100,9 +100,9 @@ class MDPDatastore(BaseRegularGridDatastore):
             if dim_order is None:
                 dim_order = dim_order_
             else:
-                assert dim_order == dim_order_, (
-                    "all inputs must have the same dimension order"
-                )
+                assert (
+                    dim_order == dim_order_
+                ), "all inputs must have the same dimension order"
 
         self.CARTESIAN_COORDS = dim_order
 
@@ -307,9 +307,9 @@ class MDPDatastore(BaseRegularGridDatastore):
             f"{category}__{split}__{op}": f"{category}_{op}" for op in ops
         }
         if category == "state":
-            stats_variables.update({
-                f"state__{split}__diff_{op}": f"state_diff_{op}" for op in ops
-            })
+            stats_variables.update(
+                {f"state__{split}__diff_{op}": f"state_diff_{op}" for op in ops}
+            )
 
         ds_stats = self._ds[stats_variables.keys()].rename(stats_variables)
         if "grid_index" in ds_stats.coords:
