@@ -5,9 +5,11 @@ from typing import Union
 # Third-party
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import pytorch_lightning as pl
 import torch
 import wandb
+import xarray as xr
 
 # Local
 from .. import metrics, vis
@@ -210,13 +212,6 @@ class ARModel(pl.LightningModule):
             config.datastore_boundary.variable_mapping
             if config.datastore_boundary
             else {}
-        )
-
-        # Create plot data manager instance (renamed from visualizer)
-        self.plot_manager = vis.PlotDataManager(
-            interior_datastore=self._datastore,
-            boundary_datastore=self._datastore_boundary,
-            boundary_var_map=self.boundary_var_map,
         )
 
     def configure_optimizers(self):
@@ -494,6 +489,52 @@ class ARModel(pl.LightningModule):
                 split="test",
             )
 
+    def _create_dataarray_from_tensor(
+        self,
+        tensor: torch.Tensor,
+        times: torch.Tensor,
+        category: str,
+        is_boundary: bool = False,
+    ) -> xr.DataArray:
+        """Helper to create DataArray from tensor with proper coords"""
+        if not isinstance(tensor, torch.Tensor):
+            raise TypeError("tensor must be a torch.Tensor")
+        if category not in ("state", "forcing"):
+            raise ValueError("category must be 'state' or 'forcing'")
+
+        # Get reference datastore and dataarray
+        datastore = self._datastore_boundary if is_boundary else self._datastore
+        ref_da = datastore.get_dataarray(category=category, split="train")
+
+        # Move to CPU and convert to numpy
+        data = tensor.detach().cpu().numpy()
+        times_np = times.detach().cpu().numpy().astype("datetime64[ns]")
+
+        # Build coordinates dict
+        coords = {
+            "time": times_np,
+            "grid_index": ref_da.grid_index,
+            f"{category}_feature": ref_da[f"{category}_feature"][
+                : tensor.shape[-1]
+            ],
+        }
+
+        # Create DataArray
+        da = xr.DataArray(
+            data,
+            dims=["time", "grid_index", f"{category}_feature"],
+            coords=coords,
+        )
+
+        # Add x/y coordinates if grid_index is not already a MultiIndex
+        if not isinstance(da.coords["grid_index"].to_index(), pd.MultiIndex):
+            da.coords["x"] = ref_da.x if "x" in ref_da.coords else None
+            da.coords["y"] = ref_da.y if "y" in ref_da.coords else None
+            # Remove None coordinates
+            da.coords = {k: v for k, v in da.coords.items() if v is not None}
+
+        return da
+
     def plot_examples(self, batch, n_examples, split, prediction=None):
         """
         Plot the first n_examples forecasts from batch
@@ -526,18 +567,12 @@ class ARModel(pl.LightningModule):
             # Each slice is (pred_steps, num_interior_nodes, d_f)
             self.plotted_examples += 1  # Increment already here
 
-            da_prediction = self.plot_manager.tensor_to_dataarray(
-                tensor=pred_slice,
-                times=time_slice,
-                category="state",
-                is_boundary=False,
+            da_prediction = self._create_dataarray_from_tensor(
+                tensor=pred_slice, times=time_slice, category="state"
             ).unstack("grid_index")
 
-            da_target = self.plot_manager.tensor_to_dataarray(
-                tensor=target_slice,
-                times=time_slice,
-                category="state",
-                is_boundary=False,
+            da_target = self._create_dataarray_from_tensor(
+                tensor=target_slice, times=time_slice, category="state"
             ).unstack("grid_index")
 
             if boundary_slice is not None and self.boundary_forced:
@@ -562,14 +597,14 @@ class ARModel(pl.LightningModule):
                     * window_size : window_size,
                 ]
 
-                da_boundary_forcing = self.plot_manager.tensor_to_dataarray(
+                da_boundary = self._create_dataarray_from_tensor(
                     tensor=boundary_slice_no_window,
                     times=time_slice,
                     category="forcing",
                     is_boundary=True,
                 )
 
-                da_boundary_t = da_boundary_forcing
+                da_boundary_t = da_boundary
 
             var_vmin = (
                 torch.minimum(
@@ -601,9 +636,9 @@ class ARModel(pl.LightningModule):
             for t_i, _ in enumerate(zip(pred_slice, target_slice), start=1):
                 if boundary_slice is not None and self.boundary_forced:
                     # Unstack the grid index to get spatial coordinates
-                    da_boundary_t = da_boundary_forcing.isel(
-                        time=t_i - 1
-                    ).unstack("grid_index")
+                    da_boundary_t = da_boundary.isel(time=t_i - 1).unstack(
+                        "grid_index"
+                    )
                 else:
                     da_boundary_t = None
 

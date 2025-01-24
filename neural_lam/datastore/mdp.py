@@ -1,6 +1,5 @@
 # Standard library
 import copy
-import functools
 import warnings
 from functools import cached_property
 from pathlib import Path
@@ -100,9 +99,9 @@ class MDPDatastore(BaseRegularGridDatastore):
             if dim_order is None:
                 dim_order = dim_order_
             else:
-                assert (
-                    dim_order == dim_order_
-                ), "all inputs must have the same dimension order"
+                assert dim_order == dim_order_, (
+                    "all inputs must have the same dimension order"
+                )
 
         self.CARTESIAN_COORDS = dim_order
 
@@ -307,9 +306,9 @@ class MDPDatastore(BaseRegularGridDatastore):
             f"{category}__{split}__{op}": f"{category}_{op}" for op in ops
         }
         if category == "state":
-            stats_variables.update(
-                {f"state__{split}__diff_{op}": f"state_diff_{op}" for op in ops}
-            )
+            stats_variables.update({
+                f"state__{split}__diff_{op}": f"state_diff_{op}" for op in ops
+            })
 
         ds_stats = self._ds[stats_variables.keys()].rename(stats_variables)
         if "grid_index" in ds_stats.coords:
@@ -508,40 +507,6 @@ class MDPDatastore(BaseRegularGridDatastore):
                 float(lats.min()),
                 float(lats.max()),
             )
-
-        # ...existing code for non-latlon case...
-
-    @functools.lru_cache
-    def get_lat_lon(self, category: str) -> np.ndarray:
-        """
-        Return the longitude, latitude coordinates of the dataset as numpy
-        array for a given category of data. Uses lat/lon directly from dataset
-        if available.
-
-        Parameters
-        ----------
-        category : str
-            The category of the dataset (state/forcing/static).
-
-        Returns
-        -------
-        np.ndarray
-            The longitude, latitude coordinates of the dataset
-            with shape `[n_grid_points, 2]`.
-        """
-        # Check first if lat/lon saved in ds
-        lookup_ds = self._ds
-        if "latitude" in lookup_ds.coords and "longitude" in lookup_ds.coords:
-            lon = lookup_ds.longitude
-            lat = lookup_ds.latitude
-        elif "lat" in lookup_ds.coords and "lon" in lookup_ds.coords:
-            lon = lookup_ds.lon
-            lat = lookup_ds.lat
-        else:
-            raise ValueError("No lat/lon coordinates found in dataset")
-
-        coords = np.stack((lon.values, lat.values), axis=1)
-        return coords
 
     @property
     def num_grid_points(self) -> int:

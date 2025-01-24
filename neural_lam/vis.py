@@ -1,5 +1,5 @@
 # Standard library
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Dict, Optional, Tuple, Union
 
 # Third-party
 import cartopy.crs as ccrs
@@ -7,211 +7,12 @@ import cartopy.feature as cfeature
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 import torch
 import xarray as xr
-from matplotlib.artist import Artist
 
 # Local
 from . import utils
-from .datastore.base import BaseDatastore, BaseRegularGridDatastore
-
-
-class PlotDataManager:
-    """Handles data preparation and metadata management for plotting.
-
-    This class manages metadata and coordinates for plotting weather data,
-    including both interior and boundary data. It provides functionality to
-    convert tensors to xarray DataArrays with proper coordinates and metadata.
-
-    Parameters
-    ----------
-    interior_datastore : BaseDatastore
-        Datastore containing the interior domain data
-    boundary_datastore : BaseDatastore, optional
-        Datastore containing boundary data
-    boundary_var_map : Dict[str, str], optional
-        Mapping between interior and boundary variable names
-
-    Attributes
-    ----------
-    metadata_interior : Dict[str, Any]
-        Metadata for interior domain plotting
-    metadata_boundary : Optional[Dict[str, Any]]
-        Metadata for boundary domain plotting, if boundary_datastore provided
-    boundary_var_map : Dict[str, str]
-        Mapping between interior and boundary variable names
-    """
-
-    def __init__(
-        self,
-        interior_datastore: BaseDatastore,
-        boundary_datastore: Optional[BaseDatastore] = None,
-        boundary_var_map: Optional[Dict[str, str]] = None,
-    ):
-        if not isinstance(interior_datastore, BaseDatastore):
-            raise TypeError("interior_datastore must be a BaseDatastore")
-        if boundary_datastore is not None and not isinstance(
-            boundary_datastore, BaseDatastore
-        ):
-            raise TypeError("boundary_datastore must be a BaseDatastore")
-        if boundary_var_map is not None and not isinstance(
-            boundary_var_map, dict
-        ):
-            raise TypeError("boundary_var_map must be a dictionary")
-
-        self._interior_datastore = interior_datastore
-        self._boundary_datastore = boundary_datastore
-        self.boundary_var_map = boundary_var_map or {}
-
-        # Extract metadata
-        self.metadata_interior = self._extract_metadata(
-            interior_datastore, "state"
-        )
-        if boundary_datastore:
-            try:
-                self.metadata_boundary = self._extract_metadata(
-                    boundary_datastore, "forcing"
-                )
-            except Exception as e:
-                raise RuntimeError("Failed to extract boundary metadata") from e
-        else:
-            self.metadata_boundary = None
-
-    @property
-    def dims_interior(self) -> Tuple[str, ...]:
-        """Get interior dimension names.
-
-        Returns
-        -------
-        Tuple[str, ...]
-            Dimension names for interior data
-        """
-        return self.metadata_interior["dims"]
-
-    @property
-    def dims_boundary(self) -> Optional[Tuple[str, ...]]:
-        """Get boundary dimension names.
-
-        Returns
-        -------
-        Optional[Tuple[str, ...]]
-            Dimension names for boundary data, None if no boundary data
-        """
-        return (
-            self.metadata_boundary["dims"] if self.metadata_boundary else None
-        )
-
-    @staticmethod
-    def _extract_metadata(
-        datastore: BaseDatastore, category: str
-    ) -> Dict[str, Any]:
-        """Extract metadata information from a datastore.
-
-        Parameters
-        ----------
-        datastore : BaseDatastore
-            The datastore to extract metadata from
-        category : str
-            Data category to extract ('state' or 'forcing')
-
-        Returns
-        -------
-        Dict[str, Any]
-            Dictionary containing metadata:
-            - grid_index: xr.DataArray
-            - feature_names: List[str]
-            - feature_units: List[str]
-            - x_coords: Optional[xr.DataArray]
-            - y_coords: Optional[xr.DataArray]
-            - projection: Optional[ccrs.Projection]
-            - dims: Tuple[str, ...]
-
-        Raises
-        ------
-        ValueError
-            If required data is missing from datastore or extraction fails
-        """
-        da = datastore.get_dataarray(category=category, split="train")
-        if da is None:
-            raise ValueError(f"No {category} data found in datastore")
-
-        try:
-            return {
-                "grid_index": da.grid_index,
-                "feature_names": datastore.get_vars_names(category),
-                "feature_units": datastore.get_vars_units(category),
-                "x_coords": da.x if "x" in da.coords else None,
-                "y_coords": da.y if "y" in da.coords else None,
-                "projection": getattr(datastore, "coords_projection", None),
-                "dims": tuple(da.dims),
-            }
-        except Exception as e:
-            raise ValueError(
-                f"Failed to extract metadata for {category}"
-            ) from e
-
-    def tensor_to_dataarray(
-        self,
-        tensor: torch.Tensor,
-        times: torch.Tensor,
-        category: str,
-        is_boundary: bool = False,
-    ) -> xr.DataArray:
-        """Convert tensor to DataArray with proper coordinates and metadata.
-
-        Parameters
-        ----------
-        tensor : torch.Tensor
-            Data tensor to convert
-        times : torch.Tensor
-            Time points in nanoseconds since epoch
-        category : str
-            Data category ('state' or 'forcing')
-        is_boundary : bool, optional
-            Whether this is boundary data (to use boundary metadata)
-
-        Returns
-        -------
-        xr.DataArray
-            DataArray with proper coordinates, dimensions and metadata
-
-        Raises
-        ------
-        TypeError
-            If tensor is not a torch.Tensor
-        ValueError
-            If category is invalid or required metadata missing
-        """
-        if not isinstance(tensor, torch.Tensor):
-            raise TypeError("tensor must be a torch.Tensor")
-        if category not in ("state", "forcing"):
-            raise ValueError("category must be 'state' or 'forcing'")
-
-        metadata = (
-            self.metadata_boundary if is_boundary else self.metadata_interior
-        )
-
-        # Move to CPU and convert to numpy
-        tensor = tensor.detach().cpu().numpy()
-        times = times.detach().cpu().numpy().astype("datetime64[ns]")
-
-        # Build coordinates dict
-        coord_dict = {
-            "time": times,
-            "grid_index": metadata["grid_index"],
-            f"{category}_feature": metadata["feature_names"],
-        }
-
-        # Create DataArray with dims from metadata
-        da = xr.DataArray(tensor, dims=metadata["dims"], coords=coord_dict)
-
-        # Add x/y coordinates if needed
-        if not isinstance(da.coords["grid_index"].to_index(), pd.MultiIndex):
-            da.coords["x"] = metadata["x_coords"]
-            da.coords["y"] = metadata["y_coords"]
-
-        return da
+from .datastore.base import BaseRegularGridDatastore
 
 
 @matplotlib.rc_context(utils.fractional_plot_bundle(1))
@@ -624,10 +425,12 @@ def plot_spatial_error(
     )
     # Convert error to DataArray
     error_da = xr.DataArray(
-        error.reshape([
-            datastore.grid_shape_state.x,
-            datastore.grid_shape_state.y,
-        ])
+        error.reshape(
+            [
+                datastore.grid_shape_state.x,
+                datastore.grid_shape_state.y,
+            ]
+        )
         .T.cpu()
         .numpy(),
         dims=("y", "x"),
