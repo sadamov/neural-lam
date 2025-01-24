@@ -214,6 +214,66 @@ class ARModel(pl.LightningModule):
             else {}
         )
 
+    def _create_dataarray_from_tensor(
+        self,
+        tensor: torch.Tensor,
+        times: torch.Tensor,
+        category: str,
+        is_boundary: bool = False,
+    ) -> xr.DataArray:
+        """Helper to create DataArray from tensor with proper coords
+        Create an `xr.DataArray` from a tensor, with the correct dimensions and
+        coordinates to match the datastore used by the model. This function in
+        in effect is the inverse of what is returned by
+        `WeatherDataset.__getitem__`.
+        Args:
+            tensor (torch.Tensor): Tensor to convert to DataArray
+            times (torch.Tensor): Time tensor
+            category (str): Category of the tensor, either 'state' or 'forcing'
+            is_boundary (bool, optional): Whether the tensor is boundary data.
+            Defaults to False.
+
+            Returns:
+                xr.DataArray: DataArray with proper coordinates
+        """
+        if not isinstance(tensor, torch.Tensor):
+            raise TypeError("tensor must be a torch.Tensor")
+        if category not in ("state", "forcing"):
+            raise ValueError("category must be 'state' or 'forcing'")
+
+        # Get reference datastore and dataarray
+        datastore = self._datastore_boundary if is_boundary else self._datastore
+        ref_da = datastore.get_dataarray(category=category, split="train")
+
+        # Move to CPU and convert to numpy
+        data = tensor.detach().cpu().numpy()
+        times_np = times.detach().cpu().numpy().astype("datetime64[ns]")
+
+        # Build coordinates dict
+        coords = {
+            "time": times_np,
+            "grid_index": ref_da.grid_index,
+            f"{category}_feature": ref_da[f"{category}_feature"][
+                : tensor.shape[-1]
+            ],
+        }
+
+        # Create DataArray
+        da = xr.DataArray(
+            data,
+            dims=["time", "grid_index", f"{category}_feature"],
+            coords=coords,
+        )
+
+        # Add x/y coordinates if grid_index is not already a MultiIndex
+        if not isinstance(da.coords["grid_index"].to_index(), pd.MultiIndex):
+            da.coords["x"] = ref_da.x if "x" in ref_da.coords else None
+            da.coords["y"] = ref_da.y if "y" in ref_da.coords else None
+            # Remove None coordinates
+            da.coords = {k: v for k, v in da.coords.items() if v is not None}
+
+        return da
+
     def configure_optimizers(self):
         opt = torch.optim.AdamW(
             self.parameters(), lr=self.args.lr, betas=(0.9, 0.95)
@@ -488,52 +548,6 @@ class ARModel(pl.LightningModule):
                 prediction=prediction,
                 split="test",
             )
-
-    def _create_dataarray_from_tensor(
-        self,
-        tensor: torch.Tensor,
-        times: torch.Tensor,
-        category: str,
-        is_boundary: bool = False,
-    ) -> xr.DataArray:
-        """Helper to create DataArray from tensor with proper coords"""
-        if not isinstance(tensor, torch.Tensor):
-            raise TypeError("tensor must be a torch.Tensor")
-        if category not in ("state", "forcing"):
-            raise ValueError("category must be 'state' or 'forcing'")
-
-        # Get reference datastore and dataarray
-        datastore = self._datastore_boundary if is_boundary else self._datastore
-        ref_da = datastore.get_dataarray(category=category, split="train")
-
-        # Move to CPU and convert to numpy
-        data = tensor.detach().cpu().numpy()
-        times_np = times.detach().cpu().numpy().astype("datetime64[ns]")
-
-        # Build coordinates dict
-        coords = {
-            "time": times_np,
-            "grid_index": ref_da.grid_index,
-            f"{category}_feature": ref_da[f"{category}_feature"][
-                : tensor.shape[-1]
-            ],
-        }
-
-        # Create DataArray
-        da = xr.DataArray(
-            data,
-            dims=["time", "grid_index", f"{category}_feature"],
-            coords=coords,
-        )
-
-        # Add x/y coordinates if grid_index is not already a MultiIndex
-        if not isinstance(da.coords["grid_index"].to_index(), pd.MultiIndex):
-            da.coords["x"] = ref_da.x if "x" in ref_da.coords else None
-            da.coords["y"] = ref_da.y if "y" in ref_da.coords else None
-            # Remove None coordinates
-            da.coords = {k: v for k, v in da.coords.items() if v is not None}
-
-        return da
 
     def plot_examples(self, batch, n_examples, split, prediction=None):
         """

@@ -648,7 +648,8 @@ class NpyFilesDatastoreMEPS(BaseRegularGridDatastore):
             The longitude, latitude coordinates of the dataset
             with shape `[n_grid_points, 2]`.
         """
-        # Here we need to transform from xy to latlon since the data is stored in xy
+        # Here we need to transform from xy to latlon since the data is stored
+        # in xy
         xy = self.get_xy_native(category=category)
         transformed_points = ccrs.PlateCarree().transform_points(
             self.coords_projection, xy[:, 0], xy[:, 1]
