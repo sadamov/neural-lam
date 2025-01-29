@@ -258,8 +258,7 @@ class BaseDatastore(abc.ABC):
     def get_xy(self, category: str) -> np.ndarray:
         """
         Return the x, y coordinates of the dataset as a numpy arrays for a
-        given category of data. Falls back to transforming lat/lon coordinates
-        if native x/y coordinates are not available.
+        given category of data.
 
         Parameters
         ----------
@@ -271,11 +270,7 @@ class BaseDatastore(abc.ABC):
         np.ndarray
             The x, y coordinates of the dataset with shape `[n_grid_points, 2]`.
         """
-        latlon = self.get_lat_lon(category=category)
-        transformed_points = self.coords_projection.transform_points(
-            ccrs.PlateCarree(), latlon[:, 0], latlon[:, 1]
-        )
-        return transformed_points[:, :2]  # Remove z-dim
+        pass
 
     @property
     @abc.abstractmethod
@@ -317,9 +312,7 @@ class BaseDatastore(abc.ABC):
         return transformed_points[:, :2]  # Remove z-dim
 
     @functools.lru_cache
-    def get_xy_extent(
-        self, category: str, use_latlon: bool = False
-    ) -> List[float]:
+    def get_xy_extent(self, category: str) -> List[float]:
         """
         Return the extent of the x, y coordinates for a given category of data.
         The extent should be returned as a list of 4 floats with `[xmin, xmax,
@@ -329,8 +322,6 @@ class BaseDatastore(abc.ABC):
         ----------
         category : str
             The category of the dataset (state/forcing/static).
-        use_latlon : bool
-            If True, use lat/lon coordinates instead of x/y.
 
         Returns
         -------
@@ -442,10 +433,7 @@ class BaseDatastore(abc.ABC):
                 # static data does not vary in time
                 if self.is_forecast:
                     dim_order.extend(
-                        [
-                            "analysis_time",
-                            "elapsed_forecast_duration",
-                        ]
+                        ["analysis_time", "elapsed_forecast_duration"]
                     )
                 elif not self.is_forecast:
                     dim_order.append("time")
