@@ -151,6 +151,32 @@ class MDPDatastore(BaseRegularGridDatastore):
         total_sec = da_dt.dt.total_seconds().isel(time=0).astype(int)
         return timedelta(seconds=int(total_sec.item()))
 
+    def _is_optional_category_missing(self, category: str) -> bool:
+        """Return True if an optional category (``forcing`` or ``static``)
+        is absent from the datastore, emitting an appropriate warning.
+        Return False if the category is present, or if the category is
+        required (``state``) and absent, in which case the caller's
+        subsequent indexing will raise.
+        """
+        if f"{category}_feature" in self._ds:
+            return False
+        if category == "forcing":
+            warnings.warn(
+                "no forcing data found in datastore",
+                UserWarning,
+                stacklevel=3,
+            )
+            return True
+        if category == "static":
+            warnings.warn(
+                "No static features found in the datastore. "
+                "Training without static features.",
+                UserWarning,
+                stacklevel=3,
+            )
+            return True
+        return False
+
     def get_vars_units(self, category: str) -> List[str]:
         """Return the units of the variables in the given category.
 
@@ -165,8 +191,7 @@ class MDPDatastore(BaseRegularGridDatastore):
             The units of the variables in the given category.
 
         """
-        if category not in self._ds and category == "forcing":
-            warnings.warn("no forcing data found in datastore")
+        if self._is_optional_category_missing(category):
             return []
         return self._ds[f"{category}_feature_units"].values.tolist()
 
@@ -184,16 +209,7 @@ class MDPDatastore(BaseRegularGridDatastore):
             The names of the variables in the given category.
 
         """
-        if f"{category}_feature" not in self._ds:
-            if category == "forcing":
-                warnings.warn("no forcing data found in datastore")
-            elif category == "static":
-                warnings.warn(
-                    "No static features found in the datastore. "
-                    "Training without static features.",
-                    UserWarning,
-                    stacklevel=2,
-                )
+        if self._is_optional_category_missing(category):
             return []
         return self._ds[f"{category}_feature"].values.tolist()
 
@@ -212,8 +228,7 @@ class MDPDatastore(BaseRegularGridDatastore):
             The long names of the variables in the given category.
 
         """
-        if category not in self._ds and category == "forcing":
-            warnings.warn("no forcing data found in datastore")
+        if self._is_optional_category_missing(category):
             return []
         return self._ds[f"{category}_feature_long_name"].values.tolist()
 
@@ -275,8 +290,7 @@ class MDPDatastore(BaseRegularGridDatastore):
             The xarray DataArray object with processed dataset.
 
         """
-        if category not in self._ds and category == "forcing":
-            warnings.warn("no forcing data found in datastore")
+        if self._is_optional_category_missing(category):
             return None
 
         da_category = self._ds[category]

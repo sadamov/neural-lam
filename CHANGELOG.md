@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Allow training with state-only datastores (no `static` features); `get_vars_names` now emits a `UserWarning` instead of raising an error [\#231](https://github.com/mllam/neural-lam/pull/231) @varunsiravuri, fixes [\#125](https://github.com/mllam/neural-lam/issues/125)
+- Allow training with state-only datastores (no `static` features); all `MDPDatastore` accessors (`get_vars_units`, `get_vars_names`, `get_vars_long_names`, `get_num_data_vars`, `get_dataarray`) now emit a `UserWarning` and return an empty result for missing optional categories (`forcing`, `static`) instead of raising [\#231](https://github.com/mllam/neural-lam/pull/231) @varunsiravuri, fixes [\#125](https://github.com/mllam/neural-lam/issues/125)
 
 - Replace `shell=True` subprocess call in `compute_standardization_stats.py` with a safe argument list and Python-side hostname parsing to prevent command injection via `SLURM_JOB_NODELIST` [\#264](https://github.com/mllam/neural-lam/pull/264) @ashum9
 - Avoid NaN when standardizing fields with zero std [#189](https://github.com/mllam/neural-lam/pull/189) @varunsiravuri
