@@ -1,7 +1,7 @@
 # Standard library
 import datetime
 import warnings
-from typing import Any, Iterator, Optional, Union
+from typing import Any, Dict, Iterator, NamedTuple, Optional, Union
 
 # Third-party
 import numpy as np
@@ -10,6 +10,7 @@ import torch
 import xarray as xr
 
 # First-party
+from neural_lam.config import DatastoreSelection, InvalidConfigError
 from neural_lam.datastore.base import BaseDatastore
 from neural_lam.utils import (
     check_time_overlap,
@@ -18,65 +19,192 @@ from neural_lam.utils import (
 )
 
 
-class WeatherDataset(torch.utils.data.Dataset):
-    """Dataset class for weather data.
+class ForecastBatch(NamedTuple):
+    """Per-sample multi-datastore forecast inputs and targets.
 
-    This class loads and processes weather data from a given datastore,
-    with optional boundary forcing from a separate boundary datastore.
-    Boundary windowing is aligned to interior state times by
-    nearest-neighbor lookup, so the interior and boundary datastores may
-    differ in step length and either side may be analysis or forecast
-    data.
+    Each field that varies per source is a :class:`dict` keyed by the
+    datastore name declared in :class:`NeuralLAMConfig.datastores`. For the
+    current release exactly one datastore contributes outputs (the
+    "interior" / prognostic source) and zero or more contribute inputs only
+    (boundary forcing, observations, etc). The dict shape is
+    forward-compatible with the multi-source prediction work tracked in
+    `mllam/neural-lam#652
+    <https://github.com/mllam/neural-lam/issues/652>`_.
+
+    Pytorch's :func:`torch.utils.data.default_collate` recurses through the
+    NamedTuple and through the dicts, stacking the per-source tensors along
+    a new batch axis. The model-side adapter for consuming this multi-source
+    shape (replacing today's positional ``(init_states, target_states,
+    forcing, boundary, target_times)`` 5-tuple unpack with per-source dict
+    access) is intentionally deferred to the follow-up work tracked in
+    #652; until that lands, training loops will fail at the batch unpack
+    site and need to be updated to read e.g.
+    ``batch.init_states["interior"]``.
+
+    Attributes
+    ----------
+    init_states : Dict[str, torch.Tensor]
+        Initial state tensors per source. Shape per entry:
+        ``(INIT_STEPS, N_grid, d_state)``.
+    target_states : Dict[str, torch.Tensor]
+        Target state tensors per source (prognostic outputs, plus any
+        diagnostic outputs concatenated along the feature axis when the
+        model-side support lands). Shape per entry:
+        ``(ar_steps, N_grid, d_state)``.
+    forcing : Dict[str, torch.Tensor]
+        Windowed forcing tensors per source. Each source may use its own
+        grid, so the ``N_grid`` and feature-axis lengths can vary across
+        keys. Shape per entry:
+        ``(ar_steps, N_grid_source, d_windowed_forcing_source)``.
+    target_times : torch.Tensor
+        Times of the target steps, shared across all sources.
+        Shape: ``(ar_steps,)``.
+    """
+
+    init_states: Dict[str, torch.Tensor]
+    target_states: Dict[str, torch.Tensor]
+    forcing: Dict[str, torch.Tensor]
+    target_times: torch.Tensor
+
+
+def _resolve_datastore_roles(
+    selections: Dict[str, DatastoreSelection],
+) -> tuple[str, Optional[str]]:
+    """Identify the unique output-producing (interior) datastore and an
+    optional input-only (boundary) datastore from the multi-source
+    selections.
+
+    Multi-source prediction (more than one output-producing datastore) and
+    multi-source inputs (more than one input-only datastore) are tracked in
+    `mllam/neural-lam#652
+    <https://github.com/mllam/neural-lam/issues/652>`_ and are not
+    supported in this release; this function raises with a clear error
+    message if the configuration goes beyond the supported single-interior
+    + optional-single-boundary shape.
 
     Parameters
     ----------
-    datastore : BaseDatastore
-        The datastore to load the data from (e.g. mdp).
+    selections : Dict[str, DatastoreSelection]
+        The datastore selections from ``NeuralLAMConfig.datastores``,
+        keyed by user-chosen names.
+
+    Returns
+    -------
+    interior_name : str
+        The name of the output-producing datastore.
+    boundary_name : str or None
+        The name of the input-only datastore, or ``None`` if no boundary
+        is configured.
+    """
+    output_names = [
+        name for name, sel in selections.items() if sel.outputs is not None
+    ]
+    if not output_names and len(selections) == 1:
+        # Single-source convenience: omitted `outputs` implies the lone
+        # datastore is the interior with all its state vars as outputs.
+        return next(iter(selections)), None
+    if len(output_names) != 1:
+        raise InvalidConfigError(
+            "Exactly one datastore must declare `outputs` in the current "
+            "release (the prognostic source). Multi-source prediction is "
+            f"tracked in #652. Got output-producing datastores: {output_names}."
+        )
+    interior_name = output_names[0]
+    input_only = [n for n in selections if n != interior_name]
+    if len(input_only) > 1:
+        raise InvalidConfigError(
+            "At most one input-only (boundary) datastore is supported in "
+            "the current release. Multi-source inputs are tracked in #652. "
+            f"Got input-only datastores: {input_only}."
+        )
+    return interior_name, (input_only[0] if input_only else None)
+
+
+class WeatherDataset(torch.utils.data.Dataset):
+    """Dataset class for weather data with multi-datastore inputs.
+
+    The dataset takes a dict of loaded datastores and a parallel dict of
+    :class:`DatastoreSelection` configs declaring how each one is consumed.
+    Exactly one datastore must produce outputs (the "interior" /
+    prognostic source), and zero or more may contribute inputs only
+    (boundary forcing, observations, ...). Boundary windowing is aligned
+    to interior state times by nearest-neighbor lookup, so the interior
+    and boundary datastores may differ in step length and either side may
+    be analysis or forecast data.
+
+    Internally the dataset still operates on a single interior + optional
+    boundary pair; multi-source prediction and multi-source inputs (more
+    than one input-only datastore) are tracked in
+    `mllam/neural-lam#652 <https://github.com/mllam/neural-lam/issues/652>`_
+    and will land via a follow-up that touches the model-side adapter as
+    well. The public return type :class:`ForecastBatch` is already shaped
+    for the multi-source case (per-source dicts) so the future change is
+    additive on the producer side.
+
+    Parameters
+    ----------
+    datastores : Dict[str, BaseDatastore]
+        The loaded datastores, keyed by their user-chosen names. Typically
+        the return value of
+        :func:`neural_lam.config.load_config_and_datastore`.
+    selections : Dict[str, DatastoreSelection]
+        The matching :class:`DatastoreSelection` configs, with the same
+        keys. The ``outputs`` field on each selection determines which
+        datastore is the interior; the others are input-only.
     split : str, optional
-        The data split to use ("train", "val" or "test"). Default is "train".
+        The data split to use ("train", "val" or "test"). Default is
+        "train".
     ar_steps : int, optional
         The number of autoregressive steps. Default is 3.
-    num_past_forcing_steps: int, optional
-        Number of past time steps to include in forcing input. If set to i,
-        forcing from times t-i, t-i+1, ..., t-1, t (and potentially beyond,
-        given num_future_forcing_steps) are included as forcing inputs at time t
-        Default is 1.
-    num_future_forcing_steps: int, optional
-        Number of future time steps to include in forcing input. If set to j,
-        forcing from times t, t+1, ..., t+j-1, t+j (and potentially times before
-        t, given num_past_forcing_steps) are included as forcing inputs at time
-        t. Default is 1.
-    num_past_boundary_steps: int, optional
+    num_past_forcing_steps : int, optional
+        Number of past time steps to include in forcing input. Default 1.
+    num_future_forcing_steps : int, optional
+        Number of future time steps to include in forcing input. Default 1.
+    num_past_boundary_steps : int, optional
         Number of past time steps to include in boundary forcing input.
-        Default is 1.
-    num_future_boundary_steps: int, optional
+        Default 1.
+    num_future_boundary_steps : int, optional
         Number of future time steps to include in boundary forcing input.
-        Default is 1.
-    datastore_boundary : BaseDatastore, optional
-        A separate datastore providing boundary forcing data. If None, no
-        boundary forcing is used (boundary tensor will be empty).
+        Default 1.
     load_single_member : bool, optional
-        If `False` and the datastore returns an ensemble of state
-        realisations, treat each state ensemble member as an independent
-        sample. If `True`, only ensemble member 0 is used. Default is False,
-        so all members are used when available.
+        If ``False`` and the interior datastore returns an ensemble of
+        state realisations, treat each state ensemble member as an
+        independent sample. If ``True``, only ensemble member 0 is used.
+        Default is ``False``.
     """
 
     INIT_STEPS = 2
 
     def __init__(
         self,
-        datastore: BaseDatastore,
+        datastores: Dict[str, BaseDatastore],
+        selections: Dict[str, DatastoreSelection],
         split: str = "train",
         ar_steps: int = 3,
         num_past_forcing_steps: int = 1,
         num_future_forcing_steps: int = 1,
         num_past_boundary_steps: int = 1,
         num_future_boundary_steps: int = 1,
-        datastore_boundary: Union[BaseDatastore, None] = None,
         load_single_member: bool = False,
     ) -> None:
         super().__init__()
+
+        self._datastores = datastores
+        self._selections = selections
+        self._interior_name, self._boundary_name = _resolve_datastore_roles(
+            selections
+        )
+
+        # Keep the legacy private state shape so the internal slicing /
+        # windowing logic below can stay intact. Multi-source consumption
+        # (iterating all datastores instead of treating one as interior
+        # and at most one as boundary) is part of the #652 follow-up.
+        datastore = datastores[self._interior_name]
+        datastore_boundary = (
+            datastores[self._boundary_name]
+            if self._boundary_name is not None
+            else None
+        )
 
         self.split = split
         self.ar_steps = ar_steps
@@ -635,39 +763,27 @@ class WeatherDataset(torch.utils.data.Dataset):
             da_target_times,
         )
 
-    def __getitem__(
-        self, idx: int
-    ) -> tuple[
-        torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
-    ]:
-        """
-        Return a single training sample, which consists of the initial states,
-        target states, forcing, boundary and batch times.
+    def __getitem__(self, idx: int) -> ForecastBatch:
+        """Return a single training sample wrapped in a :class:`ForecastBatch`.
 
-        The returned data is unstandardized; normalization is applied on-device
-        in `ForecasterModule.on_after_batch_transfer`.
+        The returned data is unstandardised; normalisation is applied
+        on-device in ``ForecasterModule.on_after_batch_transfer``.
 
         Parameters
         ----------
         idx : int
-            The index of the sample to return, this will refer to the time of
-            the initial state. Negative indices follow Python sequence
-            convention. Out-of-range indices raise ``IndexError``.
+            The index of the sample to return, this will refer to the
+            time of the initial state. Negative indices follow Python
+            sequence convention. Out-of-range indices raise
+            :class:`IndexError`.
 
         Returns
         -------
-        init_states : torch.Tensor
-            Initial states, shape (2, N_grid, d_features).
-        target_states : torch.Tensor
-            Target states, shape (ar_steps, N_grid, d_features).
-        forcing : torch.Tensor
-            Windowed forcing, shape (ar_steps, N_grid, d_windowed_forcing).
-        boundary : torch.Tensor
-            Windowed boundary forcing, shape
-            (ar_steps, N_boundary_grid, d_windowed_boundary).
-        target_times : torch.Tensor
-            Times of the target steps, shape (ar_steps,).
-
+        ForecastBatch
+            Per-source dicts of tensors plus a shared ``target_times``
+            tensor. For the current release each dict has one entry for
+            the interior source plus, when a boundary datastore is
+            configured, one entry under the boundary name in ``forcing``.
         """
         n_samples = len(self)
         if idx < 0:
@@ -692,30 +808,36 @@ class WeatherDataset(torch.utils.data.Dataset):
         target_states = torch.tensor(
             da_target_states.values, dtype=tensor_dtype
         )
-
+        forcing = torch.tensor(da_forcing_windowed.values, dtype=tensor_dtype)
+        boundary = torch.tensor(da_boundary_windowed.values, dtype=tensor_dtype)
         target_times = torch.tensor(
             da_target_times.astype("datetime64[ns]").astype("int64").values,
             dtype=torch.int64,
         )
 
-        forcing = torch.tensor(da_forcing_windowed.values, dtype=tensor_dtype)
-        boundary = torch.tensor(da_boundary_windowed.values, dtype=tensor_dtype)
+        # Pack into the multi-source-shaped ForecastBatch. Today the
+        # interior is the sole contributor to init_states/target_states,
+        # and forcing has at most one boundary entry alongside the
+        # interior one. The dicts will grow more keys when the multi-
+        # source producer side lands under #652.
+        init_states_dict: Dict[str, torch.Tensor] = {
+            self._interior_name: init_states
+        }
+        target_states_dict: Dict[str, torch.Tensor] = {
+            self._interior_name: target_states
+        }
+        forcing_dict: Dict[str, torch.Tensor] = {self._interior_name: forcing}
+        if self._boundary_name is not None:
+            forcing_dict[self._boundary_name] = boundary
 
-        # init_states: (2, N_grid, d_features)
-        # target_states: (ar_steps, N_grid, d_features)
-        # forcing: (ar_steps, N_grid, d_windowed_forcing)
-        # boundary: (ar_steps, N_boundary_grid, d_windowed_boundary)
-        # target_times: (ar_steps,)
+        return ForecastBatch(
+            init_states=init_states_dict,
+            target_states=target_states_dict,
+            forcing=forcing_dict,
+            target_times=target_times,
+        )
 
-        return init_states, target_states, forcing, boundary, target_times
-
-    def __iter__(
-        self,
-    ) -> Iterator[
-        tuple[
-            torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
-        ]
-    ]:
+    def __iter__(self) -> Iterator[ForecastBatch]:
         """
         Convenience method to iterate over the dataset.
 
@@ -732,33 +854,57 @@ class WeatherDataset(torch.utils.data.Dataset):
         time: Union[datetime.datetime, list[datetime.datetime]],
         category: str,
     ):
+        """Instance-method wrapper around :meth:`build_dataarray_from_tensor`
+        that uses this dataset's already-loaded ``da_{category}`` reference
+        as the coord source.
         """
-        Construct a xarray.DataArray from a `pytorch.Tensor` with coordinates
-        for `grid_index`, `time` and `{category}_feature` matching the shape
-        and number of times provided and add the x/y coordinates from the
-        datastore.
+        return self.build_dataarray_from_tensor(
+            reference_dataarray=getattr(self, f"da_{category}"),
+            tensor=tensor,
+            time=time,
+            category=category,
+        )
 
-        The number if times provided is expected to match the shape of the
-        tensor. For a 2D tensor, the dimensions are assumed to be (grid_index,
-        {category}_feature) and only a single time should be provided. For a 3D
-        tensor, the dimensions are assumed to be (time, grid_index,
-        {category}_feature) and a list of times should be provided.
+    @staticmethod
+    def build_dataarray_from_tensor(
+        reference_dataarray: xr.DataArray,
+        tensor: torch.Tensor,
+        time: Union[datetime.datetime, list[datetime.datetime]],
+        category: str,
+    ):
+        """Construct a :class:`xr.DataArray` from a :class:`torch.Tensor`
+        with coordinates for ``grid_index``, ``time`` and
+        ``{category}_feature`` matching the shape and number of times
+        provided, taking the per-grid coords from ``reference_dataarray``.
+
+        Refactored out of an instance method so callers that have a
+        datastore but not a full :class:`WeatherDataset` (e.g. the model
+        in ``module.py``) can build dataarrays without instantiating the
+        dataset.
 
         Parameters
         ----------
+        reference_dataarray : xr.DataArray
+            Source for ``grid_index``, ``{category}_feature``, and the
+            optional ``x``/``y`` coords. Typically what the datastore
+            returned from ``get_dataarray(category=...)``.
         tensor : torch.Tensor
-            The tensor to construct the DataArray from, this assumed to have
-            the same dimension ordering as returned by the __getitem__ method
-            (i.e. time, grid_index, {category}_feature). The tensor will be
+            The tensor to construct the DataArray from. For a 2D tensor
+            the dimensions are assumed to be
+            ``(grid_index, {category}_feature)`` and a single ``time``
+            should be provided. For a 3D tensor the dimensions are
+            assumed to be ``(time, grid_index, {category}_feature)`` and
+            a list of times should be provided. The tensor will be
             copied to the CPU before constructing the DataArray.
         time : datetime.datetime or list[datetime.datetime]
             The time or times of the tensor.
         category : str
-            The category of the tensor, either "state", "forcing" or "static".
+            The category of the tensor, either ``"state"``, ``"forcing"``
+            or ``"static"``.
 
         Returns
         -------
-        da : xr.DataArray
+        xr.DataArray
             The constructed DataArray.
         """
 
@@ -790,9 +936,8 @@ class WeatherDataset(torch.utils.data.Dataset):
                 f"{len(tensor.shape)}"
             )
 
-        da_datastore_state = getattr(self, f"da_{category}")
-        da_grid_index = da_datastore_state.grid_index
-        da_state_feature = da_datastore_state.state_feature
+        da_grid_index = reference_dataarray.grid_index
+        da_state_feature = reference_dataarray.state_feature
 
         coords = {
             f"{category}_feature": da_state_feature,
@@ -809,10 +954,10 @@ class WeatherDataset(torch.utils.data.Dataset):
 
         for grid_coord in ["x", "y"]:
             if (
-                grid_coord in da_datastore_state.coords
+                grid_coord in reference_dataarray.coords
                 and grid_coord not in da.coords
             ):
-                da.coords[grid_coord] = da_datastore_state[grid_coord]
+                da.coords[grid_coord] = reference_dataarray[grid_coord]
 
         if not add_time_as_dim:
             da.coords["time"] = time
@@ -825,22 +970,22 @@ class WeatherDataModule(pl.LightningDataModule):
 
     def __init__(
         self,
-        datastore: BaseDatastore,
+        datastores: Dict[str, BaseDatastore],
+        selections: Dict[str, DatastoreSelection],
         ar_steps_train: int = 3,
         ar_steps_eval: int = 25,
         num_past_forcing_steps: int = 1,
         num_future_forcing_steps: int = 1,
         num_past_boundary_steps: int = 1,
         num_future_boundary_steps: int = 1,
-        datastore_boundary: Union[BaseDatastore, None] = None,
         load_single_member: bool = False,
         batch_size: int = 4,
         num_workers: int = 16,
         eval_split: str = "test",
     ) -> None:
         super().__init__()
-        self._datastore = datastore
-        self._datastore_boundary = datastore_boundary
+        self._datastores = datastores
+        self._selections = selections
         self.num_past_forcing_steps = num_past_forcing_steps
         self.num_future_forcing_steps = num_future_forcing_steps
         self.num_past_boundary_steps = num_past_boundary_steps
@@ -862,22 +1007,21 @@ class WeatherDataModule(pl.LightningDataModule):
 
     def setup(self, stage: Optional[str] = None) -> None:
         shared_kwargs: dict[str, Any] = dict(
+            datastores=self._datastores,
+            selections=self._selections,
             num_past_forcing_steps=self.num_past_forcing_steps,
             num_future_forcing_steps=self.num_future_forcing_steps,
             num_past_boundary_steps=self.num_past_boundary_steps,
             num_future_boundary_steps=self.num_future_boundary_steps,
-            datastore_boundary=self._datastore_boundary,
             load_single_member=self.load_single_member,
         )
         if stage == "fit" or stage is None:
             self.train_dataset = WeatherDataset(
-                datastore=self._datastore,
                 split="train",
                 ar_steps=self.ar_steps_train,
                 **shared_kwargs,
             )
             self.val_dataset = WeatherDataset(
-                datastore=self._datastore,
                 split="val",
                 ar_steps=self.ar_steps_eval,
                 **shared_kwargs,
@@ -885,7 +1029,6 @@ class WeatherDataModule(pl.LightningDataModule):
 
         if stage == "test" or stage is None:
             self.test_dataset = WeatherDataset(
-                datastore=self._datastore,
                 split=self.eval_split,
                 ar_steps=self.ar_steps_eval,
                 **shared_kwargs,

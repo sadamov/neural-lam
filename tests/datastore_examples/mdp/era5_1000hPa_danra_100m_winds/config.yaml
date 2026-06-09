@@ -1,9 +1,13 @@
-datastore:
-  kind: mdp
-  config_path: danra.datastore.yaml
-datastore_boundary:
-  kind: mdp
-  config_path: era5.datastore.yaml
+datastores:
+  interior:
+    kind: mdp
+    config_path: danra.datastore.yaml
+    outputs:
+      state:  # all state vars are prognostic outputs
+  boundary:
+    kind: mdp
+    config_path: era5.datastore.yaml
+    # no `outputs:` declared, so this datastore is input-only
 training:
   state_feature_weighting:
     __config_class__: ManualStateFeatureWeighting

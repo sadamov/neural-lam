@@ -391,8 +391,18 @@ def main(input_args=None):
     seed.seed_everything(args.seed)
 
     # Load neural-lam configuration and datastores to use
-    config, datastore, datastore_boundary = load_config_and_datastore(
-        config_path=args.config_path
+    config, datastores = load_config_and_datastore(config_path=args.config_path)
+
+    # Resolve interior + boundary roles for the legacy single-source
+    # model side (ForecasterModule, predictor). Multi-source consumption
+    # on the model side is tracked in #652.
+    # Local
+    from .weather_dataset import _resolve_datastore_roles
+
+    interior_name, boundary_name = _resolve_datastore_roles(config.datastores)
+    datastore = datastores[interior_name]
+    datastore_boundary = (
+        datastores[boundary_name] if boundary_name is not None else None
     )
 
     # Check --var_leads_metrics_watch variable indices against the datastore
@@ -408,16 +418,16 @@ def main(input_args=None):
                 f"{len(state_var_names)} state variables)."
             )
 
-    # Create datamodule
+    # Create datamodule - takes the full multi-source dicts
     data_module = WeatherDataModule(
-        datastore=datastore,
+        datastores=datastores,
+        selections=config.datastores,
         ar_steps_train=args.ar_steps_train,
         ar_steps_eval=args.ar_steps_eval,
         num_past_forcing_steps=args.num_past_forcing_steps,
         num_future_forcing_steps=args.num_future_forcing_steps,
         num_past_boundary_steps=args.num_past_boundary_steps,
         num_future_boundary_steps=args.num_future_boundary_steps,
-        datastore_boundary=datastore_boundary,
         load_single_member=args.load_single_member,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
